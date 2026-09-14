@@ -31,7 +31,7 @@ No installation, package manager, build step, or local server is required. Doubl
 
 ## GitHub Pages
 
-The public GitHub Pages URL will be added here after the repository is published and deployment is verified.
+Play the deployed game at <https://gplexs.github.io/speaki-e-jump/>.
 
 ## Project structure
 
