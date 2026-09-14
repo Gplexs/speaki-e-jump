@@ -14,9 +14,11 @@ The player jumps automatically whenever it lands on a platform.
 ## Implemented features
 
 - Accelerated horizontal movement with friction and air control
+- Normal jump height increased by 50% from the initial prototype
 - Horizontal screen wrapping
 - One-way platform collision using the previous frame position
 - Reachability-aware endless platform generation
+- Two distinct, reachable platform routes during the opening 10 seconds
 - Normal, horizontally moving, and breakable platforms
 - Spring items with a stronger jump
 - Upward-only camera scrolling

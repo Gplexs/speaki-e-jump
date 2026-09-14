@@ -5,7 +5,9 @@
     width: 480,
     height: 720,
     gravity: 1850,
-    jumpPower: 720,
+    jumpHeightMultiplier: 1.5,
+    // Jump height is proportional to launch velocity squared.
+    jumpPower: 720 * Math.sqrt(1.5),
     springJumpMultiplier: 1.7,
     moveAcceleration: 2200,
     horizontalFriction: 8,
@@ -16,6 +18,16 @@
     platformHeight: 14,
     startPlatformWidth: 132,
     startPlatformY: 650,
+    openingRouteLayers: 11, // Eleven landings plus the merge is roughly ten seconds.
+    openingRouteMinGap: 113,
+    openingRouteMaxGap: 121,
+    openingRouteMinWidth: 100,
+    openingRouteMaxWidth: 112,
+    openingRouteHorizontalJitter: 14,
+    openingRouteSpreads: Object.freeze([80, 100, 115]),
+    openingRouteInnerHalfGap: 80,
+    openingRouteVerticalStagger: 14,
+    openingRouteMergeGap: 108,
     cameraThreshold: 0.4,
     cleanupMargin: 100,
     spawnMargin: 130,
@@ -180,6 +192,9 @@
       this.breaking = false;
       this.breakTimer = 0;
       this.removed = false;
+      this.openingRoute = null;
+      this.openingLayer = null;
+      this.openingMerge = false;
       this.moveDirection = Math.random() < 0.5 ? -1 : 1;
       this.moveSpeed = moveSpeed;
       this.moveMin = Math.max(8, x - moveRange);
@@ -242,11 +257,15 @@
       this.platforms = [];
       this.generatedCount = 0;
       this.lastGenerated = null;
+      this.openingRoutes = null;
+      this.openingLayer = 0;
+      this.openingLayerY = 0;
     }
 
     reset(score = 0) {
       this.platforms.length = 0;
       this.generatedCount = 0;
+      this.openingLayer = 0;
 
       const startX = (GameConfig.width - GameConfig.startPlatformWidth) / 2;
       const start = new Platform(
@@ -257,6 +276,8 @@
       );
       this.platforms.push(start);
       this.lastGenerated = start;
+      this.openingRoutes = [start, start];
+      this.openingLayerY = start.y;
       this.ensurePlatforms(score);
       return start;
     }
@@ -277,10 +298,85 @@
     }
 
     ensurePlatforms(score) {
+      if (this.openingRoutes) {
+        while (this.openingLayer < GameConfig.openingRouteLayers) {
+          this.createOpeningRouteLayer();
+        }
+        this.mergeOpeningRoutes();
+      }
+
       while (this.lastGenerated.y > -GameConfig.spawnMargin) {
         this.lastGenerated = this.createNextPlatform(this.lastGenerated, score);
         this.platforms.push(this.lastGenerated);
       }
+    }
+
+    createOpeningRouteLayer() {
+      const nextLayer = this.openingLayer + 1;
+      const gap = randomRange(GameConfig.openingRouteMinGap, GameConfig.openingRouteMaxGap);
+      this.openingLayerY -= gap;
+      const nextRoutes = this.openingRoutes.map((previous, routeId) => {
+        const width = randomRange(
+          GameConfig.openingRouteMinWidth,
+          GameConfig.openingRouteMaxWidth
+        );
+        const y = this.openingLayerY +
+          (routeId === 0 ? -GameConfig.openingRouteVerticalStagger : GameConfig.openingRouteVerticalStagger);
+        const x = this.findOpeningRouteX(previous, width, routeId, nextLayer);
+        const platform = new Platform(x, y, width, PlatformType.NORMAL);
+        platform.openingRoute = routeId;
+        platform.openingLayer = nextLayer;
+        return platform;
+      });
+
+      this.platforms.push(...nextRoutes);
+      this.openingRoutes = nextRoutes;
+      this.openingLayer = nextLayer;
+      this.generatedCount += 1;
+      this.lastGenerated = nextRoutes.reduce(
+        (highest, platform) => platform.y < highest.y ? platform : highest,
+        nextRoutes[0]
+      );
+    }
+
+    findOpeningRouteX(previous, width, routeId, layer) {
+      const edgeInset = 8;
+      const halfWidth = width * 0.5;
+      const previousCenter = previous.x + previous.width * 0.5;
+      const openingSpreads = GameConfig.openingRouteSpreads;
+      const scriptedSpread = openingSpreads[Math.min(layer, openingSpreads.length) - 1];
+      const scriptedCenter = GameConfig.width * 0.5 + (routeId === 0 ? -scriptedSpread : scriptedSpread);
+      const desiredCenter = layer <= openingSpreads.length
+        ? scriptedCenter + randomRange(-5, 5)
+        : previousCenter + randomRange(
+          -GameConfig.openingRouteHorizontalJitter,
+          GameConfig.openingRouteHorizontalJitter
+        );
+      const laneMin = routeId === 0
+        ? halfWidth + edgeInset
+        : GameConfig.width * 0.5 + GameConfig.openingRouteInnerHalfGap;
+      const laneMax = routeId === 0
+        ? GameConfig.width * 0.5 - GameConfig.openingRouteInnerHalfGap
+        : GameConfig.width - halfWidth - edgeInset;
+      const center = clamp(desiredCenter, laneMin, laneMax);
+      return center - halfWidth;
+    }
+
+    mergeOpeningRoutes() {
+      const highestY = Math.min(...this.openingRoutes.map((platform) => platform.y));
+      const width = GameConfig.openingRouteMaxWidth;
+      const x = (GameConfig.width - width) * 0.5;
+      const merge = new Platform(
+        x,
+        highestY - GameConfig.openingRouteMergeGap,
+        width,
+        PlatformType.NORMAL
+      );
+      merge.openingMerge = true;
+      this.platforms.push(merge);
+      this.generatedCount += 1;
+      this.lastGenerated = merge;
+      this.openingRoutes = null;
     }
 
     createNextPlatform(previous, score) {
@@ -522,6 +618,7 @@
       this.score = 0;
       this.maxHeight = 0;
       this.cameraOffset = 0;
+      this.playTime = 0;
       const startPlatform = this.platformManager.reset(0);
       const playerX = startPlatform.x + (startPlatform.width - GameConfig.playerWidth) * 0.5;
       const playerY = startPlatform.y - GameConfig.playerHeight;
@@ -566,6 +663,7 @@
     }
 
     update(deltaTime) {
+      this.playTime += deltaTime;
       this.platformManager.update(deltaTime);
       this.player.update(deltaTime, this.input.direction);
 
@@ -699,7 +797,9 @@
         state: this.state,
         score: this.score,
         bestScore: this.bestScore,
+        playTime: Math.round(this.playTime * 100) / 100,
         cameraOffset: Math.round(this.cameraOffset * 100) / 100,
+        openingRouteLayerCount: this.platformManager.openingLayer,
         player: {
           x: Math.round(this.player.x * 100) / 100,
           y: Math.round(this.player.y * 100) / 100,
@@ -712,7 +812,10 @@
           width: Math.round(platform.width * 100) / 100,
           type: platform.type,
           hasSpring: Boolean(platform.item),
-          breaking: platform.breaking
+          breaking: platform.breaking,
+          openingRoute: platform.openingRoute,
+          openingLayer: platform.openingLayer,
+          openingMerge: platform.openingMerge
         }))
       };
     }
