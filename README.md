@@ -17,8 +17,10 @@ The player jumps automatically whenever it lands on a platform.
 - Normal jump height increased by 50% from the initial prototype
 - Horizontal screen wrapping
 - One-way platform collision using the previous frame position
-- Reachability-aware endless platform generation
-- Two distinct, reachable platform routes during the opening 10 seconds
+- Layer-based endless generation with a physics-validated safe path
+- Reachable optional platforms that create regular route choices
+- Opening route choices safely rejoin the next guaranteed platform
+- Controlled variation across platform height, spacing, and screen position
 - Normal, horizontally moving, and breakable platforms
 - Spring items with a stronger jump
 - Upward-only camera scrolling
@@ -30,6 +32,14 @@ The player jumps automatically whenever it lands on a platform.
 ## Run locally
 
 No installation, package manager, build step, or local server is required. Double-click `index.html` and play in a modern desktop browser.
+
+Run the deterministic platform-generation regression suite with Node.js:
+
+```text
+node platform-generation.test.js
+```
+
+When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`) and filler (`F`) platforms and reproduces the same layout. Debug display is disabled by default.
 
 ## GitHub Pages
 
@@ -43,6 +53,7 @@ speaki-e-jump/
 ├── .nojekyll
 ├── game.js       # Game rules, physics, state, object management, and rendering
 ├── index.html
+├── platform-generation.test.js
 ├── README.md
 └── style.css
 ```
