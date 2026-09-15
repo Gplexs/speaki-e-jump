@@ -642,133 +642,101 @@ test("camera, height score, and dynamic generation track fast flight continuousl
   );
 });
 
-test("flight completion provides a nearby safe recovery landing and continuation", () => {
+test("flight completion does not create or repurpose a recovery platform", () => {
   const game = makeGame();
-  for (const platform of game.platformManager.platforms) {
-    if (platform.item?.type !== ItemType.SPRING) {
-      platform.item = null;
-    }
-  }
-  const thresholdY = GameConfig.height * GameConfig.cameraThreshold;
-  game.player.x = (GameConfig.width - game.player.width) * 0.5;
-  game.player.y = thresholdY;
+  const existingPlatform = makePlatform(100, 500, 130);
+  existingPlatform.isGuaranteed = true;
+  existingPlatform.layerIndex = 20;
+  game.platformManager.platforms = [existingPlatform];
+  game.platformManager.ensurePlatforms = () => {};
+  game.player.x = 150;
+  game.player.y = 300;
   game.player.previousX = game.player.x;
   game.player.previousY = game.player.y;
   game.player.activatePowerUp(ItemType.PROPELLER_HAT);
   game.player.powerUpTimer = 0.05;
-  const recoveryEventsBefore =
-    game.platformManager.stats.recoveryPlatformsCreated +
-    game.platformManager.stats.recoveryPlatformsReused;
 
   game.update(0.1);
+
   assert.equal(game.player.isFlying, false);
   assert(game.player.vy > 0, "gravity should resume in the timer-overrun portion");
-  const recoveryEventsAfter =
-    game.platformManager.stats.recoveryPlatformsCreated +
-    game.platformManager.stats.recoveryPlatformsReused;
-  assert.equal(recoveryEventsAfter, recoveryEventsBefore + 1);
-
-  const playerBottom = game.player.y + game.player.height;
-  const safeLandings = game.platformManager.platforms.filter((platform) =>
-    platform.type === PlatformType.NORMAL &&
-    !platform.breaking &&
-    !platform.removed &&
-    platform.y >= playerBottom + 48 - 1e-6 &&
-    platform.y <= playerBottom + 240 + 1e-6 &&
-    (!platform.item || platform.item.type === ItemType.SPRING) &&
-    game.platformManager.getWrappedHorizontalOverlap(
-      game.player.x,
-      game.player.width,
-      platform.x,
-      platform.width
-    ) >= GameConfig.minimumLandingOverlap
-  );
-  assert(safeLandings.length > 0, "a safe platform must be below the flight endpoint");
-  assert(
-    safeLandings.some((platform) => game.platformManager.hasGuaranteedContinuation(platform)),
-    "the recovery landing must connect back to the guaranteed route"
-  );
-
-  let bounced = false;
-  for (let frame = 0; frame < 180 && game.state === GameState.PLAYING; frame += 1) {
-    game.update(1 / 60);
-    if (game.player.vy < 0) {
-      bounced = true;
-      break;
-    }
-  }
-  assert.equal(bounced, true, "the player should naturally fall onto a recovery landing");
-  assert.equal(game.state, GameState.PLAYING);
+  assert.equal(game.platformManager.platforms.length, 1);
+  assert.equal(game.platformManager.platforms[0], existingPlatform);
+  assert.equal(typeof game.platformManager.ensureFlightExitPlatform, "undefined");
+  assert.equal("recoveryPlatformsCreated" in game.platformManager.stats, false);
+  assert.equal("recoveryPlatformsReused" in game.platformManager.stats, false);
 });
 
-test("recovery placement is robust across seeds and wrapped endpoint positions", () => {
-  for (let seed = 0; seed < 24; seed += 1) {
-    for (const playerX of [-GameConfig.playerWidth + 1, 0, 223, GameConfig.width - 1]) {
-      const manager = new PlatformManager(new DifficultyManager(), {
-        seed: `recovery-${seed}-${playerX}`,
-        debugEnabled: false
-      });
-      manager.reset(0, true);
-      manager.scroll(GameConfig.height * 1.4);
-      manager.cleanupPlatforms();
-      manager.ensurePlatforms(1000, GameConfig.jetpackFlightSpeed * GameConfig.jetpackDuration);
+test("Guaranteed Path becomes BREAKABLE at a 25% rate from 8,000 points", () => {
+  assert.equal(GameConfig.guaranteedBreakableScoreThreshold, 8000);
+  assert.equal(GameConfig.guaranteedBreakableChance, 0.25);
 
-      const player = new Player(playerX, GameConfig.height * GameConfig.cameraThreshold);
-      const metadataBefore = {
-        highestGeneratedY: manager.highestGeneratedY,
-        lastGuaranteedPlatform: manager.lastGuaranteedPlatform,
-        layerIndex: manager.layerIndex
-      };
-      const platformsBefore = manager.platforms.slice();
-      const recovery = manager.ensureFlightExitPlatform(player);
+  const manager = new PlatformManager(new DifficultyManager(), {
+    seed: "guaranteed-breakable-boundaries",
+    debugEnabled: false
+  });
+  manager.reset(0, false);
 
-      assert(recovery, `missing recovery for seed ${seed} at x=${playerX}`);
-      assert.equal(recovery.type, PlatformType.NORMAL);
-      assert.equal(recovery.breaking, false);
-      assert.equal(recovery.removed, false);
-      assert(
-        manager.getWrappedHorizontalOverlap(
-          player.x,
-          player.width,
-          recovery.x,
-          recovery.width
-        ) >= GameConfig.minimumLandingOverlap
-      );
-      assert.equal(
-        manager.hasGuaranteedContinuation(recovery),
-        true,
-        `recovery did not reconnect for seed ${seed} at x=${playerX}: ${JSON.stringify({
-          recovery: {
-            x: recovery.x,
-            y: recovery.y,
-            width: recovery.width,
-            isRecovery: recovery.isRecovery
-          },
-          nearbyGuaranteed: manager.platforms
-            .filter((platform) => platform.isGuaranteed && platform.y < recovery.y)
-            .sort((first, second) => second.y - first.y)
-            .slice(0, 3)
-            .map((platform) => ({
-              x: platform.x,
-              y: platform.y,
-              width: platform.width,
-              reach: PlatformPhysics.getReachability(recovery, platform, true)
-            }))
-        })}`
-      );
-      assert.equal(manager.highestGeneratedY, metadataBefore.highestGeneratedY);
-      assert.equal(manager.lastGuaranteedPlatform, metadataBefore.lastGuaranteedPlatform);
-      assert.equal(manager.layerIndex, metadataBefore.layerIndex);
+  manager.routeTypeRandom = fixedRandom(0);
+  const beforeThreshold = makePlatform();
+  assert.equal(
+    manager.applyGuaranteedPlatformDifficulty(beforeThreshold, 7999),
+    false
+  );
+  assert.equal(beforeThreshold.type, PlatformType.NORMAL);
 
-      if (recovery.isRecovery) {
-        assert.equal(recovery.item, null);
-        assert(
-          platformsBefore.every((platform) => !manager.platformsAreTooClose(recovery, platform)),
-          "a created recovery platform must not overlap the generated layout"
-        );
-      }
+  const atThreshold = makePlatform();
+  assert.equal(
+    manager.applyGuaranteedPlatformDifficulty(atThreshold, 8000),
+    true
+  );
+  assert.equal(atThreshold.type, PlatformType.BREAKABLE);
+  assert.equal(atThreshold.generationScore, 8000);
+
+  manager.routeTypeRandom = fixedRandom(0.25);
+  const boundaryMiss = makePlatform();
+  assert.equal(
+    manager.applyGuaranteedPlatformDifficulty(boundaryMiss, 8000),
+    false
+  );
+  assert.equal(boundaryMiss.type, PlatformType.NORMAL);
+
+  const aggregate = new PlatformManager(new DifficultyManager(), {
+    seed: "guaranteed-breakable-rate",
+    debugEnabled: false
+  });
+  aggregate.reset(0, false);
+  let breakableCount = 0;
+  const sampleCount = 4000;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const result = aggregate.generateNextLayer(8000);
+    if (result.guaranteed.type === PlatformType.BREAKABLE) {
+      breakableCount += 1;
+      assert.equal(result.guaranteed.item, null);
     }
+    aggregate.platforms = aggregate.platforms.filter(
+      (platform) => platform.y < aggregate.highestGeneratedY + GameConfig.height
+    );
   }
+  const observedRate = breakableCount / sampleCount;
+  assert(
+    observedRate >= 0.23 && observedRate <= 0.27,
+    `observed Guaranteed BREAKABLE rate ${observedRate} is not near 25%`
+  );
+  assert.equal(aggregate.stats.guaranteedBreakablesGenerated, breakableCount);
+
+  const breakableRoute = makePlatform(100, 300, 130, PlatformType.BREAKABLE);
+  breakableRoute.isGuaranteed = true;
+  const game = makeGame();
+  game.platformManager.platforms = [breakableRoute];
+  game.player.reset(120, breakableRoute.y - game.player.height + 5);
+  game.player.previousY = breakableRoute.y - game.player.height - 5;
+  game.player.vy = 300;
+  game.resolveLandings();
+  assert.equal(breakableRoute.breaking, true);
+  assert.equal(game.player.vy, -GameConfig.jumpPower);
+  breakableRoute.update(GameConfig.breakDelay);
+  assert.equal(breakableRoute.removed, true);
 });
 
 test("game over, restart, collection, and cleanup leave no active stale state", () => {
@@ -780,7 +748,6 @@ test("game over, restart, collection, and cleanup leave no active stale state", 
   assert.equal(game.player.powerUpTimer, 0);
 
   const stalePlatform = makePlatform(100, 300, 130);
-  stalePlatform.isRecovery = true;
   stalePlatform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());
   game.platformManager.platforms.push(stalePlatform);
   game.player.activatePowerUp(ItemType.PROPELLER_HAT);
@@ -790,8 +757,7 @@ test("game over, restart, collection, and cleanup leave no active stale state", 
   assert.equal(game.player.powerUpTimer, 0);
   assert.equal(game.player.isFlying, false);
   assert.equal(game.platformManager.platforms.includes(stalePlatform), false);
-  assert.equal(game.platformManager.stats.recoveryPlatformsCreated, 0);
-  assert.equal(game.platformManager.stats.recoveryPlatformsReused, 0);
+  assert.equal(game.platformManager.stats.guaranteedBreakablesGenerated, 0);
 
   const manager = new PlatformManager(new DifficultyManager(), { seed: "cleanup" });
   manager.reset(0, false);

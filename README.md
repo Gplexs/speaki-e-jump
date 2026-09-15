@@ -22,9 +22,10 @@ The player jumps automatically whenever it lands on a platform.
 - Opening route choices safely rejoin the next guaranteed platform
 - Controlled variation across platform height, spacing, and screen position
 - Normal, horizontally moving, and breakable platforms
+- Guaranteed Path platforms become breakable at a 25% rate from 8,000 points
 - Spring items with a stronger jump
 - Timed Propeller Hat and Jetpack flight power-ups on safe normal platforms
-- Power-up-aware spawn-ahead generation and safe post-flight recovery platforms
+- Power-up-aware spawn-ahead generation
 - Upward-only camera scrolling
 - Height-based score and locally saved best score
 - Menu, gameplay, game-over, and stable restart states
@@ -42,7 +43,7 @@ node platform-generation.test.js
 node powerup.test.js
 ```
 
-When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`), filler (`F`), and recovery (`R`) platforms and reproduces the same layout. Debug display is disabled by default. Runtime power-up state and remaining flight distance are available through `window.speakiJump.getSnapshot()`.
+When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`) and filler (`F`) platforms and reproduces the same layout. Debug display is disabled by default. Runtime power-up state and remaining flight distance are available through `window.speakiJump.getSnapshot()`.
 
 ## GitHub Pages
 

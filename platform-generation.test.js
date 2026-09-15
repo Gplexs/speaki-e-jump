@@ -132,6 +132,7 @@ function copyPlatform(platform, scrollOffset) {
   return {
     allowWrappingFromPrevious: Boolean(platform.allowWrappingFromPrevious),
     generationFallback: Boolean(platform.generationFallback),
+    generationScore: platform.generationScore,
     itemType: platform.item?.type || null,
     height: platform.height,
     isGuaranteed: Boolean(platform.isGuaranteed),
@@ -384,6 +385,8 @@ function validateGeneratedPlatforms(run) {
     .sort((a, b) => a.layerIndex - b.layerIndex);
   let unreachable = 0;
   let independentUnreachable = 0;
+  let breakableEligible = 0;
+  let breakableGuaranteed = 0;
   const verticalGaps = [];
   const safeHorizontalTravels = [];
 
@@ -393,11 +396,18 @@ function validateGeneratedPlatforms(run) {
     const verticalGap = previous.worldY - current.worldY;
     verticalGaps.push(verticalGap);
     assert(verticalGap > 0, `layer ${current.layerIndex} did not move upward`);
-    assert.notEqual(
-      current.type,
-      PlatformType.BREAKABLE,
-      `layer ${current.layerIndex} uses BREAKABLE as the guaranteed route`
-    );
+    if (current.generationScore < GameConfig.guaranteedBreakableScoreThreshold) {
+      assert.notEqual(
+        current.type,
+        PlatformType.BREAKABLE,
+        `layer ${current.layerIndex} became BREAKABLE before 8,000 points`
+      );
+    } else {
+      breakableEligible += 1;
+      if (current.type === PlatformType.BREAKABLE) {
+        breakableGuaranteed += 1;
+      }
+    }
 
     const reachability = PlatformPhysics.getReachability(
       { x: previous.x, y: previous.worldY, width: previous.width },
@@ -459,6 +469,11 @@ function validateGeneratedPlatforms(run) {
   }
   assert.equal(unreachable, 0, "unreachable Guaranteed Platforms reported by production physics");
   assert.equal(independentUnreachable, 0, "unreachable Guaranteed Platforms in independent physics");
+  const guaranteedBreakableRate = breakableGuaranteed / breakableEligible;
+  assert(
+    guaranteedBreakableRate >= 0.21 && guaranteedBreakableRate <= 0.29,
+    `post-8,000 Guaranteed BREAKABLE rate ${guaranteedBreakableRate} is not near 25%`
+  );
 
   const sortedByY = generated.slice().sort((a, b) => a.worldY - b.worldY);
   let overlapCount = 0;
@@ -518,9 +533,12 @@ function validateGeneratedPlatforms(run) {
 
   return {
     averageDensity: round(averageDensity, 3),
+    breakableEligible,
+    breakableGuaranteed,
     fallbackCount: guaranteed.filter((platform) => platform.generationFallback).length,
     generatedPlatformCount: generated.length,
     guaranteedCount: guaranteed.length,
+    guaranteedBreakableRate: round(guaranteedBreakableRate, 4),
     horizontalBucketCounts: buckets,
     independentUnreachable,
     maxSafeHorizontalTravel: round(Math.max(...safeHorizontalTravels), 3),
@@ -581,7 +599,7 @@ function validateForcedFallback() {
   const outsideBefore = manager.stats.rejectedCandidates.outside;
   const createCandidate = manager.createCandidate.bind(manager);
 
-  // Exercise the recovery branch by making every ordinary candidate fail the
+  // Exercise the fallback branch by making every ordinary candidate fail the
   // production bounds check. Filler generation is unrelated to this probe.
   manager.createCandidate = (...args) => {
     const candidate = createCandidate(...args);

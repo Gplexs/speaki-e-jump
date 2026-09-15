@@ -17,6 +17,8 @@
     jetpackDuration: 3,
     jetpackFlightSpeed: 480,
     jetpackMinSpawnGap: 22,
+    guaranteedBreakableScoreThreshold: 8000,
+    guaranteedBreakableChance: 0.25,
     moveAcceleration: 2200,
     horizontalFriction: 8,
     maxMoveSpeed: 330,
@@ -608,7 +610,7 @@
       this.allowWrappingFromPrevious = false;
       this.generationFallback = false;
       this.generationSettings = null;
-      this.isRecovery = false;
+      this.generationScore = 0;
       this.moveDirection = type === PlatformType.MOVING && random && random.next() < 0.5
         ? -1
         : 1;
@@ -720,6 +722,10 @@
         ? null
         : `${this.seed}:items`;
       this.itemRandom = new RandomSource(this.itemSeed);
+      this.routeTypeSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:route-types`;
+      this.routeTypeRandom = new RandomSource(this.routeTypeSeed);
       this.platforms = [];
       this.generatedCount = 0;
       this.layerIndex = 0;
@@ -738,8 +744,7 @@
         platformsGenerated: 0,
         fallbackCount: 0,
         skippedFillers: 0,
-        recoveryPlatformsCreated: 0,
-        recoveryPlatformsReused: 0,
+        guaranteedBreakablesGenerated: 0,
         itemsGenerated: {
           [ItemType.SPRING]: 0,
           [ItemType.PROPELLER_HAT]: 0,
@@ -762,6 +767,7 @@
       this.platforms.length = 0;
       this.random.reset(this.seed);
       this.itemRandom.reset(this.itemSeed);
+      this.routeTypeRandom.reset(this.routeTypeSeed);
       this.generatedCount = 1;
       this.layerIndex = 0;
       this.recentGuaranteed.length = 0;
@@ -824,189 +830,6 @@
       }
     }
 
-    ensureFlightExitPlatform(player) {
-      const playerBottom = player.y + player.height;
-      const minDrop = 48;
-      const maxDrop = 240;
-      const usableExisting = this.platforms
-        .filter((platform) =>
-          platform.type === PlatformType.NORMAL &&
-          !platform.breaking &&
-          !platform.removed &&
-          platform.y >= playerBottom + minDrop &&
-          platform.y <= playerBottom + maxDrop &&
-          (!platform.item || platform.item.type === ItemType.SPRING) &&
-          this.getWrappedHorizontalOverlap(player.x, player.width, platform.x, platform.width) >=
-            GameConfig.minimumLandingOverlap
-        )
-        .sort((first, second) => first.y - second.y);
-
-      const reusable = usableExisting.find((platform) =>
-        this.hasGuaranteedContinuation(platform)
-      );
-      if (reusable) {
-        this.stats.recoveryPlatformsReused += 1;
-        return reusable;
-      }
-
-      const playerCenter = this.normalizeScreenX(player.x + player.width * 0.5);
-      const guaranteedTargets = this.platforms
-        .filter((platform) =>
-          platform.isGuaranteed &&
-          !platform.breaking &&
-          !platform.removed &&
-          platform.y < playerBottom + maxDrop
-        )
-        .sort((first, second) => second.y - first.y);
-      const widths = [
-        150,
-        GameConfig.startPlatformWidth,
-        112,
-        96,
-        80,
-        72,
-        180,
-        220,
-        GameConfig.width - GameConfig.sidePadding * 2
-      ];
-      const dropOffsets = [64, 84, 104, 124, 144, 168, 196, 224];
-      let fallbackCandidate = null;
-
-      for (const width of widths) {
-        const centerOptions = this.getRecoveryCenterOptions(
-          player,
-          playerCenter,
-          width,
-          guaranteedTargets
-        );
-
-        for (const dropOffset of dropOffsets) {
-          const y = playerBottom + dropOffset;
-          if (y + GameConfig.platformHeight >= GameConfig.height) {
-            continue;
-          }
-
-          for (const center of centerOptions) {
-            const candidate = new Platform(
-              center - width * 0.5,
-              y,
-              width,
-              PlatformType.NORMAL,
-              0,
-              0,
-              this.random
-            );
-            candidate.layerIndex = -1;
-            candidate.isRecovery = true;
-
-            if (
-              !this.isInsideScreen(candidate) ||
-              this.overlapsExistingPlatform(candidate) ||
-              this.getWrappedHorizontalOverlap(
-                player.x,
-                player.width,
-                candidate.x,
-                candidate.width
-              ) < GameConfig.minimumLandingOverlap
-            ) {
-              continue;
-            }
-
-            if (!fallbackCandidate) {
-              fallbackCandidate = candidate;
-            }
-            const continuation = guaranteedTargets.find((target) =>
-              PlatformPhysics.getReachability(candidate, target, true).reachable
-            );
-            if (continuation) {
-              candidate.recoveryTargetLayer = continuation.layerIndex;
-              this.platforms.push(candidate);
-              this.stats.recoveryPlatformsCreated += 1;
-              return candidate;
-            }
-          }
-        }
-      }
-
-      if (fallbackCandidate) {
-        this.platforms.push(fallbackCandidate);
-        this.stats.recoveryPlatformsCreated += 1;
-        return fallbackCandidate;
-      }
-
-      if (usableExisting.length > 0) {
-        this.stats.recoveryPlatformsReused += 1;
-        return usableExisting[0];
-      }
-      return null;
-    }
-
-    getWrappedHorizontalOverlap(firstX, firstWidth, secondX, secondWidth) {
-      let maximumOverlap = 0;
-      for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
-        const left = Math.max(firstX, secondX + offset);
-        const right = Math.min(firstX + firstWidth, secondX + offset + secondWidth);
-        maximumOverlap = Math.max(maximumOverlap, right - left);
-      }
-      return maximumOverlap;
-    }
-
-    normalizeScreenX(value) {
-      return ((value % GameConfig.width) + GameConfig.width) % GameConfig.width;
-    }
-
-    getRecoveryCenterOptions(player, playerCenter, width, guaranteedTargets) {
-      const minimumCenter = GameConfig.sidePadding + width * 0.5;
-      const maximumCenter = GameConfig.width - GameConfig.sidePadding - width * 0.5;
-      const minimumOverlap = GameConfig.minimumLandingOverlap;
-      const intervals = [];
-
-      for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
-        const lower = Math.max(
-          minimumCenter,
-          player.x + minimumOverlap - offset - width * 0.5
-        );
-        const upper = Math.min(
-          maximumCenter,
-          player.x + player.width - minimumOverlap - offset + width * 0.5
-        );
-        if (lower <= upper + 1e-9) {
-          intervals.push({ lower, upper });
-        }
-      }
-
-      const centers = [];
-      for (const interval of intervals) {
-        centers.push(
-          interval.lower,
-          interval.upper,
-          (interval.lower + interval.upper) * 0.5,
-          clamp(playerCenter, interval.lower, interval.upper)
-        );
-        for (const target of guaranteedTargets) {
-          const targetCenter = target.x + target.width * 0.5;
-          for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
-            centers.push(clamp(targetCenter + offset, interval.lower, interval.upper));
-          }
-        }
-      }
-
-      return centers.filter(
-        (center, index) =>
-          centers.findIndex((candidate) => Math.abs(candidate - center) < 1e-6) === index
-      );
-    }
-
-    hasGuaranteedContinuation(platform) {
-      return this.platforms.some((target) =>
-        target !== platform &&
-        target.isGuaranteed &&
-        !target.breaking &&
-        !target.removed &&
-        PlatformPhysics.getReachability(platform, target, true).reachable
-      );
-    }
-
     generateInitialPlatforms(score = 0) {
       return this.reset(score);
     }
@@ -1022,6 +845,7 @@
         nextLayerIndex,
         routeSources
       );
+      this.applyGuaranteedPlatformDifficulty(guaranteed, score);
 
       this.platforms.push(guaranteed);
       const fillers = this.generateFillerPlatforms(
@@ -1075,6 +899,20 @@
       }
 
       return { guaranteed, fillers, settings };
+    }
+
+    applyGuaranteedPlatformDifficulty(platform, score) {
+      platform.generationScore = score;
+      if (
+        score < GameConfig.guaranteedBreakableScoreThreshold ||
+        !this.routeTypeRandom.chance(GameConfig.guaranteedBreakableChance)
+      ) {
+        return false;
+      }
+
+      platform.type = PlatformType.BREAKABLE;
+      this.stats.guaranteedBreakablesGenerated += 1;
+      return true;
     }
 
     tryAddFlightPowerUp(platform, layerIndex) {
@@ -1773,6 +1611,7 @@
         generationFailures,
         fallbackCount: manager.stats.fallbackCount,
         skippedFillers: manager.stats.skippedFillers,
+        guaranteedBreakablesGenerated: manager.stats.guaranteedBreakablesGenerated,
         itemsGenerated: { ...manager.stats.itemsGenerated },
         maximumJumpHeight: round(PlatformPhysics.getMaximumJumpHeight()),
         safeVerticalReach: round(
@@ -1877,7 +1716,7 @@
         context.textAlign = "center";
         context.textBaseline = "bottom";
         context.fillText(
-          platform.isRecovery ? "R" : platform.isGuaranteed ? "G" : "F",
+          platform.isGuaranteed ? "G" : "F",
           platform.x + platform.width * 0.5,
           platform.y - 3
         );
@@ -2098,16 +1937,6 @@
         return;
       }
 
-      if (this.player.powerUpEndedThisFrame) {
-        const offscreenDistance = Math.max(0, -this.player.y);
-        this.platformManager.ensurePlatforms(
-          this.score,
-          offscreenDistance +
-            PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio
-        );
-        this.platformManager.ensureFlightExitPlatform(this.player);
-      }
-
       this.resolveLandings();
       this.updateCamera();
       this.updateScore();
@@ -2289,8 +2118,8 @@
           debugEnabled: this.platformManager.debugEnabled,
           seed: this.platformManager.seed,
           fallbackCount: this.platformManager.stats.fallbackCount,
-          recoveryPlatformsCreated: this.platformManager.stats.recoveryPlatformsCreated,
-          recoveryPlatformsReused: this.platformManager.stats.recoveryPlatformsReused,
+          guaranteedBreakablesGenerated:
+            this.platformManager.stats.guaranteedBreakablesGenerated,
           itemsGenerated: {
             ...this.platformManager.stats.itemsGenerated
           },
@@ -2318,7 +2147,6 @@
           breaking: platform.breaking,
           layerIndex: platform.layerIndex,
           isGuaranteed: platform.isGuaranteed,
-          isRecovery: platform.isRecovery,
           generationFallback: platform.generationFallback,
           allowWrappingFromPrevious: platform.allowWrappingFromPrevious
         }))
