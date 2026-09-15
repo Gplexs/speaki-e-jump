@@ -9,6 +9,14 @@
     // Jump height is proportional to launch velocity squared.
     jumpPower: 720 * Math.sqrt(1.5),
     springJumpMultiplier: 1.7,
+    propellerSpawnChance: 0.025,
+    propellerDuration: 3.5,
+    propellerFlightSpeed: 280,
+    propellerMinSpawnGap: 18,
+    jetpackSpawnChance: 0.01,
+    jetpackDuration: 3,
+    jetpackFlightSpeed: 480,
+    jetpackMinSpawnGap: 22,
     moveAcceleration: 2200,
     horizontalFriction: 8,
     maxMoveSpeed: 330,
@@ -50,6 +58,12 @@
     NORMAL: "NORMAL",
     MOVING: "MOVING",
     BREAKABLE: "BREAKABLE"
+  });
+
+  const ItemType = Object.freeze({
+    SPRING: "SPRING",
+    PROPELLER_HAT: "PROPELLER_HAT",
+    JETPACK: "JETPACK"
   });
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -402,15 +416,68 @@
       this.previousY = y;
       this.vx = 0;
       this.vy = 0;
+      this.activePowerUp = null;
+      this.powerUpTimer = 0;
+      this.powerUpFlightSpeed = 0;
+      this.powerUpEndedThisFrame = false;
     }
 
     launch(multiplier = 1) {
+      if (this.isFlying) {
+        return;
+      }
       this.vy = -GameConfig.jumpPower * multiplier;
+    }
+
+    get isFlying() {
+      return this.activePowerUp === ItemType.PROPELLER_HAT ||
+        this.activePowerUp === ItemType.JETPACK;
+    }
+
+    get remainingFlightDistance() {
+      return this.isFlying ? this.powerUpFlightSpeed * this.powerUpTimer : 0;
+    }
+
+    activatePowerUp(type) {
+      const settings = type === ItemType.PROPELLER_HAT
+        ? {
+            duration: GameConfig.propellerDuration,
+            speed: GameConfig.propellerFlightSpeed
+          }
+        : type === ItemType.JETPACK
+          ? {
+              duration: GameConfig.jetpackDuration,
+              speed: GameConfig.jetpackFlightSpeed
+            }
+          : null;
+
+      if (!settings) {
+        return false;
+      }
+
+      this.activePowerUp = type;
+      this.powerUpTimer = settings.duration;
+      this.powerUpFlightSpeed = settings.speed;
+      this.powerUpEndedThisFrame = false;
+      this.vy = -settings.speed;
+      return true;
+    }
+
+    clearPowerUp(markEnded = false) {
+      const wasFlying = this.isFlying;
+      this.activePowerUp = null;
+      this.powerUpTimer = 0;
+      this.powerUpFlightSpeed = 0;
+      if (wasFlying) {
+        this.vy = 0;
+      }
+      this.powerUpEndedThisFrame = markEnded && wasFlying;
     }
 
     update(deltaTime, direction) {
       this.previousX = this.x;
       this.previousY = this.y;
+      this.powerUpEndedThisFrame = false;
 
       if (direction !== 0) {
         this.vx += direction * GameConfig.moveAcceleration * deltaTime;
@@ -422,9 +489,30 @@
       }
 
       this.vx = clamp(this.vx, -GameConfig.maxMoveSpeed, GameConfig.maxMoveSpeed);
-      this.vy = Math.min(this.vy + GameConfig.gravity * deltaTime, GameConfig.maxFallSpeed);
       this.x += this.vx * deltaTime;
-      this.y += this.vy * deltaTime;
+
+      let normalPhysicsTime = deltaTime;
+      if (this.isFlying) {
+        const flyingTime = Math.min(deltaTime, this.powerUpTimer);
+        this.vy = -this.powerUpFlightSpeed;
+        this.y += this.vy * flyingTime;
+        this.powerUpTimer = Math.max(0, this.powerUpTimer - flyingTime);
+        normalPhysicsTime -= flyingTime;
+
+        if (this.powerUpTimer <= 1e-9) {
+          this.clearPowerUp(true);
+        }
+      }
+
+      if (!this.isFlying && normalPhysicsTime > 0) {
+        this.vy = Math.min(
+          this.vy + GameConfig.gravity * normalPhysicsTime,
+          GameConfig.maxFallSpeed
+        );
+        this.y += this.vy * normalPhysicsTime;
+      } else if (!this.isFlying && deltaTime === 0) {
+        this.vy = Math.min(this.vy, GameConfig.maxFallSpeed);
+      }
 
       if (this.x + this.width < 0) {
         this.x = GameConfig.width;
@@ -436,12 +524,14 @@
     }
   }
 
-  class Spring {
-    constructor(platform, offsetX) {
+  class Item {
+    constructor(platform, type, offsetX, width, height) {
       this.platform = platform;
+      this.type = type;
       this.offsetX = offsetX;
-      this.width = 20;
-      this.height = 12;
+      this.width = width;
+      this.height = height;
+      this.collected = false;
     }
 
     get x() {
@@ -450,6 +540,47 @@
 
     get y() {
       return this.platform.y - this.height;
+    }
+
+    collect() {
+      if (this.collected) {
+        return false;
+      }
+      this.collected = true;
+      if (this.platform.item === this) {
+        this.platform.item = null;
+      }
+      return true;
+    }
+  }
+
+  class PowerUp extends Item {
+    constructor(platform, type, width, height, random) {
+      const centerOffset = (platform.width - width) * 0.5;
+      const offsetX = clamp(
+        centerOffset + (random ? random.range(-6, 6) : 0),
+        6,
+        platform.width - width - 6
+      );
+      super(platform, type, offsetX, width, height);
+    }
+  }
+
+  class Spring extends Item {
+    constructor(platform, offsetX) {
+      super(platform, ItemType.SPRING, offsetX, 20, 12);
+    }
+  }
+
+  class PropellerHat extends PowerUp {
+    constructor(platform, random) {
+      super(platform, ItemType.PROPELLER_HAT, 28, 18, random);
+    }
+  }
+
+  class Jetpack extends PowerUp {
+    constructor(platform, random) {
+      super(platform, ItemType.JETPACK, 24, 26, random);
     }
   }
 
@@ -477,6 +608,7 @@
       this.allowWrappingFromPrevious = false;
       this.generationFallback = false;
       this.generationSettings = null;
+      this.isRecovery = false;
       this.moveDirection = type === PlatformType.MOVING && random && random.next() < 0.5
         ? -1
         : 1;
@@ -489,9 +621,27 @@
     }
 
     addSpring(random) {
+      if (this.type !== PlatformType.NORMAL || this.item) {
+        return false;
+      }
       const inset = 8;
       const maxOffset = Math.max(inset, this.width - 20 - inset);
       this.item = new Spring(this, random.range(inset, maxOffset));
+      return true;
+    }
+
+    addPowerUp(type, random) {
+      if (this.type !== PlatformType.NORMAL || this.item) {
+        return false;
+      }
+      if (type === ItemType.PROPELLER_HAT) {
+        this.item = new PropellerHat(this, random);
+      } else if (type === ItemType.JETPACK) {
+        this.item = new Jetpack(this, random);
+      } else {
+        return false;
+      }
+      return true;
     }
 
     beginBreaking() {
@@ -566,6 +716,10 @@
       this.debugEnabled = options.debugEnabled ?? debugOptions.enabled;
       this.seed = hasSeedOverride ? options.seed : debugOptions.seed;
       this.random = new RandomSource(this.seed);
+      this.itemSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:items`;
+      this.itemRandom = new RandomSource(this.itemSeed);
       this.platforms = [];
       this.generatedCount = 0;
       this.layerIndex = 0;
@@ -574,6 +728,7 @@
       this.recentGuaranteed = [];
       this.recentVerticalGaps = [];
       this.layersSinceFiller = 0;
+      this.lastFlightPowerUpLayer = -Infinity;
       this.stats = this.createEmptyStats();
     }
 
@@ -583,6 +738,13 @@
         platformsGenerated: 0,
         fallbackCount: 0,
         skippedFillers: 0,
+        recoveryPlatformsCreated: 0,
+        recoveryPlatformsReused: 0,
+        itemsGenerated: {
+          [ItemType.SPRING]: 0,
+          [ItemType.PROPELLER_HAT]: 0,
+          [ItemType.JETPACK]: 0
+        },
         rejectedCandidates: {
           unreachable: 0,
           outside: 0,
@@ -599,11 +761,13 @@
     reset(score = 0, preload = true) {
       this.platforms.length = 0;
       this.random.reset(this.seed);
+      this.itemRandom.reset(this.itemSeed);
       this.generatedCount = 1;
       this.layerIndex = 0;
       this.recentGuaranteed.length = 0;
       this.recentVerticalGaps.length = 0;
       this.layersSinceFiller = 0;
+      this.lastFlightPowerUpLayer = -Infinity;
       this.stats = this.createEmptyStats();
 
       const startX = (GameConfig.width - GameConfig.startPlatformWidth) / 2;
@@ -644,8 +808,10 @@
       this.highestGeneratedY += distance;
     }
 
-    ensurePlatforms(score) {
-      const spawnTargetY = -GameConfig.height * GameConfig.spawnAheadScreens;
+    ensurePlatforms(score, additionalAheadDistance = 0) {
+      const spawnTargetY =
+        -GameConfig.height * GameConfig.spawnAheadScreens -
+        Math.max(0, additionalAheadDistance);
       let generatedThisUpdate = 0;
 
       while (this.highestGeneratedY > spawnTargetY && generatedThisUpdate < 64) {
@@ -656,6 +822,189 @@
       if (this.highestGeneratedY > spawnTargetY) {
         throw new Error("Platform generation did not advance above the spawn target.");
       }
+    }
+
+    ensureFlightExitPlatform(player) {
+      const playerBottom = player.y + player.height;
+      const minDrop = 48;
+      const maxDrop = 240;
+      const usableExisting = this.platforms
+        .filter((platform) =>
+          platform.type === PlatformType.NORMAL &&
+          !platform.breaking &&
+          !platform.removed &&
+          platform.y >= playerBottom + minDrop &&
+          platform.y <= playerBottom + maxDrop &&
+          (!platform.item || platform.item.type === ItemType.SPRING) &&
+          this.getWrappedHorizontalOverlap(player.x, player.width, platform.x, platform.width) >=
+            GameConfig.minimumLandingOverlap
+        )
+        .sort((first, second) => first.y - second.y);
+
+      const reusable = usableExisting.find((platform) =>
+        this.hasGuaranteedContinuation(platform)
+      );
+      if (reusable) {
+        this.stats.recoveryPlatformsReused += 1;
+        return reusable;
+      }
+
+      const playerCenter = this.normalizeScreenX(player.x + player.width * 0.5);
+      const guaranteedTargets = this.platforms
+        .filter((platform) =>
+          platform.isGuaranteed &&
+          !platform.breaking &&
+          !platform.removed &&
+          platform.y < playerBottom + maxDrop
+        )
+        .sort((first, second) => second.y - first.y);
+      const widths = [
+        150,
+        GameConfig.startPlatformWidth,
+        112,
+        96,
+        80,
+        72,
+        180,
+        220,
+        GameConfig.width - GameConfig.sidePadding * 2
+      ];
+      const dropOffsets = [64, 84, 104, 124, 144, 168, 196, 224];
+      let fallbackCandidate = null;
+
+      for (const width of widths) {
+        const centerOptions = this.getRecoveryCenterOptions(
+          player,
+          playerCenter,
+          width,
+          guaranteedTargets
+        );
+
+        for (const dropOffset of dropOffsets) {
+          const y = playerBottom + dropOffset;
+          if (y + GameConfig.platformHeight >= GameConfig.height) {
+            continue;
+          }
+
+          for (const center of centerOptions) {
+            const candidate = new Platform(
+              center - width * 0.5,
+              y,
+              width,
+              PlatformType.NORMAL,
+              0,
+              0,
+              this.random
+            );
+            candidate.layerIndex = -1;
+            candidate.isRecovery = true;
+
+            if (
+              !this.isInsideScreen(candidate) ||
+              this.overlapsExistingPlatform(candidate) ||
+              this.getWrappedHorizontalOverlap(
+                player.x,
+                player.width,
+                candidate.x,
+                candidate.width
+              ) < GameConfig.minimumLandingOverlap
+            ) {
+              continue;
+            }
+
+            if (!fallbackCandidate) {
+              fallbackCandidate = candidate;
+            }
+            const continuation = guaranteedTargets.find((target) =>
+              PlatformPhysics.getReachability(candidate, target, true).reachable
+            );
+            if (continuation) {
+              candidate.recoveryTargetLayer = continuation.layerIndex;
+              this.platforms.push(candidate);
+              this.stats.recoveryPlatformsCreated += 1;
+              return candidate;
+            }
+          }
+        }
+      }
+
+      if (fallbackCandidate) {
+        this.platforms.push(fallbackCandidate);
+        this.stats.recoveryPlatformsCreated += 1;
+        return fallbackCandidate;
+      }
+
+      if (usableExisting.length > 0) {
+        this.stats.recoveryPlatformsReused += 1;
+        return usableExisting[0];
+      }
+      return null;
+    }
+
+    getWrappedHorizontalOverlap(firstX, firstWidth, secondX, secondWidth) {
+      let maximumOverlap = 0;
+      for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
+        const left = Math.max(firstX, secondX + offset);
+        const right = Math.min(firstX + firstWidth, secondX + offset + secondWidth);
+        maximumOverlap = Math.max(maximumOverlap, right - left);
+      }
+      return maximumOverlap;
+    }
+
+    normalizeScreenX(value) {
+      return ((value % GameConfig.width) + GameConfig.width) % GameConfig.width;
+    }
+
+    getRecoveryCenterOptions(player, playerCenter, width, guaranteedTargets) {
+      const minimumCenter = GameConfig.sidePadding + width * 0.5;
+      const maximumCenter = GameConfig.width - GameConfig.sidePadding - width * 0.5;
+      const minimumOverlap = GameConfig.minimumLandingOverlap;
+      const intervals = [];
+
+      for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
+        const lower = Math.max(
+          minimumCenter,
+          player.x + minimumOverlap - offset - width * 0.5
+        );
+        const upper = Math.min(
+          maximumCenter,
+          player.x + player.width - minimumOverlap - offset + width * 0.5
+        );
+        if (lower <= upper + 1e-9) {
+          intervals.push({ lower, upper });
+        }
+      }
+
+      const centers = [];
+      for (const interval of intervals) {
+        centers.push(
+          interval.lower,
+          interval.upper,
+          (interval.lower + interval.upper) * 0.5,
+          clamp(playerCenter, interval.lower, interval.upper)
+        );
+        for (const target of guaranteedTargets) {
+          const targetCenter = target.x + target.width * 0.5;
+          for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
+            centers.push(clamp(targetCenter + offset, interval.lower, interval.upper));
+          }
+        }
+      }
+
+      return centers.filter(
+        (center, index) =>
+          centers.findIndex((candidate) => Math.abs(candidate - center) < 1e-6) === index
+      );
+    }
+
+    hasGuaranteedContinuation(platform) {
+      return this.platforms.some((target) =>
+        target !== platform &&
+        target.isGuaranteed &&
+        !target.breaking &&
+        !target.removed &&
+        PlatformPhysics.getReachability(platform, target, true).reachable
+      );
     }
 
     generateInitialPlatforms(score = 0) {
@@ -682,6 +1031,7 @@
         nextLayerIndex
       );
       this.platforms.push(...fillers);
+      this.tryAddFlightPowerUp(guaranteed, nextLayerIndex);
 
       this.layerIndex = nextLayerIndex;
       this.lastGuaranteedPlatform = guaranteed;
@@ -725,6 +1075,39 @@
       }
 
       return { guaranteed, fillers, settings };
+    }
+
+    tryAddFlightPowerUp(platform, layerIndex) {
+      if (
+        layerIndex <= GameConfig.safeOpeningLayers ||
+        platform.type !== PlatformType.NORMAL ||
+        platform.item
+      ) {
+        return null;
+      }
+
+      const layerGap = layerIndex - this.lastFlightPowerUpLayer;
+      const roll = this.itemRandom.next();
+      let type = null;
+      if (
+        layerGap >= GameConfig.propellerMinSpawnGap &&
+        roll < GameConfig.propellerSpawnChance
+      ) {
+        type = ItemType.PROPELLER_HAT;
+      } else if (
+        layerGap >= GameConfig.jetpackMinSpawnGap &&
+        roll < GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance
+      ) {
+        type = ItemType.JETPACK;
+      }
+
+      if (!type || !platform.addPowerUp(type, this.itemRandom)) {
+        return null;
+      }
+
+      this.lastFlightPowerUpLayer = layerIndex;
+      this.stats.itemsGenerated[type] += 1;
+      return platform.item;
     }
 
     generateGuaranteedPlatform(previous, settings, layerIndex, routeSources = [previous]) {
@@ -1073,9 +1456,10 @@
           candidate.reachability = reach;
           if (
             type === PlatformType.NORMAL &&
-            this.random.chance(settings.springChance)
+            this.random.chance(settings.springChance) &&
+            candidate.addSpring(this.random)
           ) {
-            candidate.addSpring(this.random);
+            this.stats.itemsGenerated[ItemType.SPRING] += 1;
           }
           created = candidate;
           break;
@@ -1389,6 +1773,7 @@
         generationFailures,
         fallbackCount: manager.stats.fallbackCount,
         skippedFillers: manager.stats.skippedFillers,
+        itemsGenerated: { ...manager.stats.itemsGenerated },
         maximumJumpHeight: round(PlatformPhysics.getMaximumJumpHeight()),
         safeVerticalReach: round(
           PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio
@@ -1420,6 +1805,8 @@
         moving: "#418ad6",
         breakable: "#dc8735",
         spring: "#e7df55",
+        propeller: "#b86cff",
+        jetpack: "#ef4e4e",
         text: "#ffffff",
         overlay: "rgba(8, 13, 18, 0.78)",
         button: "#33495c"
@@ -1442,6 +1829,22 @@
       const context = this.context;
       context.fillStyle = this.colors.player;
       this.drawWrappedRectangle(player.x, player.y, player.width, player.height);
+      if (player.isFlying) {
+        const isPropeller = player.activePowerUp === ItemType.PROPELLER_HAT;
+        context.fillStyle = isPropeller ? this.colors.propeller : this.colors.jetpack;
+        context.font = "bold 13px Arial, sans-serif";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        const label = isPropeller ? "P" : "J";
+        const labelX = player.x + player.width * 0.5;
+        const labelY = player.y + player.height * 0.5;
+        context.fillText(label, labelX, labelY);
+        if (player.x < 0) {
+          context.fillText(label, labelX + GameConfig.width, labelY);
+        } else if (player.x + player.width > GameConfig.width) {
+          context.fillText(label, labelX - GameConfig.width, labelY);
+        }
+      }
     }
 
     drawPlatform(platform, debugPlatformGeneration = false) {
@@ -1465,7 +1868,7 @@
       context.restore();
 
       if (platform.item && !platform.breaking) {
-        this.drawSpring(platform.item);
+        this.drawItem(platform.item);
       }
 
       if (debugPlatformGeneration) {
@@ -1474,10 +1877,20 @@
         context.textAlign = "center";
         context.textBaseline = "bottom";
         context.fillText(
-          platform.isGuaranteed ? "G" : "F",
+          platform.isRecovery ? "R" : platform.isGuaranteed ? "G" : "F",
           platform.x + platform.width * 0.5,
           platform.y - 3
         );
+      }
+    }
+
+    drawItem(item) {
+      if (item.type === ItemType.SPRING) {
+        this.drawSpring(item);
+      } else if (item.type === ItemType.PROPELLER_HAT) {
+        this.drawPropellerHat(item);
+      } else if (item.type === ItemType.JETPACK) {
+        this.drawJetpack(item);
       }
     }
 
@@ -1492,6 +1905,52 @@
       context.lineTo(spring.x + spring.width * 0.75, spring.y);
       context.lineTo(spring.x + spring.width, spring.y + spring.height);
       context.stroke();
+    }
+
+    drawPropellerHat(propeller) {
+      const context = this.context;
+      context.fillStyle = this.colors.propeller;
+      context.fillRect(propeller.x, propeller.y + 3, propeller.width, 4);
+      context.fillRect(
+        propeller.x + propeller.width * 0.44,
+        propeller.y,
+        propeller.width * 0.12,
+        propeller.height
+      );
+      context.fillRect(
+        propeller.x + propeller.width * 0.22,
+        propeller.y + propeller.height - 7,
+        propeller.width * 0.56,
+        7
+      );
+      context.fillStyle = this.colors.text;
+      context.font = "bold 9px Arial, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "bottom";
+      context.fillText("P", propeller.x + propeller.width * 0.5, propeller.y + propeller.height);
+    }
+
+    drawJetpack(jetpack) {
+      const context = this.context;
+      context.fillStyle = this.colors.jetpack;
+      context.fillRect(jetpack.x, jetpack.y + 3, jetpack.width * 0.36, jetpack.height - 3);
+      context.fillRect(
+        jetpack.x + jetpack.width * 0.64,
+        jetpack.y + 3,
+        jetpack.width * 0.36,
+        jetpack.height - 3
+      );
+      context.fillRect(
+        jetpack.x + jetpack.width * 0.28,
+        jetpack.y,
+        jetpack.width * 0.44,
+        jetpack.height * 0.7
+      );
+      context.fillStyle = this.colors.text;
+      context.font = "bold 10px Arial, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText("J", jetpack.x + jetpack.width * 0.5, jetpack.y + jetpack.height * 0.38);
     }
 
     drawWrappedRectangle(x, y, width, height) {
@@ -1632,20 +2091,72 @@
       this.playTime += deltaTime;
       this.platformManager.update(deltaTime);
       this.player.update(deltaTime, this.input.direction);
+      this.resolvePowerUpPickups();
 
       if (this.player.y > GameConfig.height) {
         this.finishGame();
         return;
       }
 
+      if (this.player.powerUpEndedThisFrame) {
+        const offscreenDistance = Math.max(0, -this.player.y);
+        this.platformManager.ensurePlatforms(
+          this.score,
+          offscreenDistance +
+            PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio
+        );
+        this.platformManager.ensureFlightExitPlatform(this.player);
+      }
+
       this.resolveLandings();
       this.updateCamera();
       this.updateScore();
-      this.platformManager.ensurePlatforms(this.score);
+      const flightGenerationReserve = this.player.isFlying
+        ? this.player.remainingFlightDistance +
+          PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio
+        : 0;
+      this.platformManager.ensurePlatforms(this.score, flightGenerationReserve);
+    }
+
+    resolvePowerUpPickups() {
+      const sweptTop = Math.min(this.player.previousY, this.player.y);
+      const sweptBottom = Math.max(
+        this.player.previousY + this.player.height,
+        this.player.y + this.player.height
+      );
+      const previousCenterY = this.player.previousY + this.player.height * 0.5;
+      let selected = null;
+
+      for (const platform of this.platformManager.platforms) {
+        const item = platform.item;
+        if (
+          platform.breaking ||
+          platform.removed ||
+          !item ||
+          item.collected ||
+          (item.type !== ItemType.PROPELLER_HAT && item.type !== ItemType.JETPACK) ||
+          sweptBottom < item.y ||
+          sweptTop > item.y + item.height ||
+          !this.overlapsWrappedX(item.x, item.width)
+        ) {
+          continue;
+        }
+
+        const distance = Math.abs(item.y + item.height * 0.5 - previousCenterY);
+        if (!selected || distance < selected.distance) {
+          selected = { item, distance };
+        }
+      }
+
+      if (!selected || !selected.item.collect()) {
+        return null;
+      }
+      this.player.activatePowerUp(selected.item.type);
+      return selected.item;
     }
 
     resolveLandings() {
-      if (this.player.vy <= 0) {
+      if (this.player.isFlying || this.player.vy <= 0) {
         return;
       }
 
@@ -1658,7 +2169,9 @@
           continue;
         }
 
-        const spring = platform.item;
+        const spring = platform.item?.type === ItemType.SPRING
+          ? platform.item
+          : null;
         if (spring && this.crossesTop(previousBottom, currentBottom, spring.y) && this.overlapsWrappedX(spring.x, spring.width)) {
           if (!selected || spring.y < selected.top) {
             selected = { platform, top: spring.y, spring: true };
@@ -1722,6 +2235,7 @@
     finishGame() {
       this.state = GameState.GAME_OVER;
       this.input.clear();
+      this.player.clearPowerUp();
       if (this.score > this.bestScore) {
         this.bestScore = this.score;
         this.saveBestScore(this.bestScore);
@@ -1775,6 +2289,11 @@
           debugEnabled: this.platformManager.debugEnabled,
           seed: this.platformManager.seed,
           fallbackCount: this.platformManager.stats.fallbackCount,
+          recoveryPlatformsCreated: this.platformManager.stats.recoveryPlatformsCreated,
+          recoveryPlatformsReused: this.platformManager.stats.recoveryPlatformsReused,
+          itemsGenerated: {
+            ...this.platformManager.stats.itemsGenerated
+          },
           rejectedCandidates: {
             ...this.platformManager.stats.rejectedCandidates
           }
@@ -1783,17 +2302,23 @@
           x: Math.round(this.player.x * 100) / 100,
           y: Math.round(this.player.y * 100) / 100,
           vx: Math.round(this.player.vx * 100) / 100,
-          vy: Math.round(this.player.vy * 100) / 100
+          vy: Math.round(this.player.vy * 100) / 100,
+          activePowerUp: this.player.activePowerUp,
+          powerUpTimer: round(this.player.powerUpTimer),
+          isFlying: this.player.isFlying,
+          remainingFlightDistance: round(this.player.remainingFlightDistance)
         },
         platforms: this.platformManager.platforms.map((platform) => ({
           x: Math.round(platform.x * 100) / 100,
           y: Math.round(platform.y * 100) / 100,
           width: Math.round(platform.width * 100) / 100,
           type: platform.type,
-          hasSpring: Boolean(platform.item),
+          itemType: platform.item?.type || null,
+          hasSpring: platform.item?.type === ItemType.SPRING,
           breaking: platform.breaking,
           layerIndex: platform.layerIndex,
           isGuaranteed: platform.isGuaranteed,
+          isRecovery: platform.isRecovery,
           generationFallback: platform.generationFallback,
           allowWrappingFromPrevious: platform.allowWrappingFromPrevious
         }))

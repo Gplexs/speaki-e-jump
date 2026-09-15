@@ -132,7 +132,7 @@ function copyPlatform(platform, scrollOffset) {
   return {
     allowWrappingFromPrevious: Boolean(platform.allowWrappingFromPrevious),
     generationFallback: Boolean(platform.generationFallback),
-    hasSpring: Boolean(platform.item),
+    itemType: platform.item?.type || null,
     height: platform.height,
     isGuaranteed: Boolean(platform.isGuaranteed),
     layerIndex: platform.layerIndex,
@@ -172,7 +172,7 @@ function signature(platforms, layerLimit = Infinity) {
       round(platform.worldY),
       round(platform.width),
       platform.type,
-      platform.hasSpring,
+      platform.itemType,
       platform.allowWrappingFromPrevious,
       platform.generationFallback
     ]);

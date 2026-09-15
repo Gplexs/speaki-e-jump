@@ -1,0 +1,874 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const gamePath = path.join(__dirname, "game.js");
+const rawSource = fs.readFileSync(gamePath, "utf8");
+const canvasMarker = '  const canvas = document.getElementById("gameCanvas");';
+const gameMarker = "  const game = new Game(canvas);";
+
+assert(rawSource.includes(canvasMarker), "game.js bootstrap marker changed");
+assert(rawSource.includes(gameMarker), "game.js Game bootstrap marker changed");
+
+// Production classes remain private. Only this in-memory VM copy exposes them.
+const instrumentedSource = rawSource
+  .replace(
+    canvasMarker,
+    `  window.__powerUpTestInternals = Object.freeze({
+    GameConfig,
+    GameState,
+    PlatformType,
+    ItemType,
+    RandomSource,
+    PlatformPhysics,
+    Player,
+    Item,
+    PowerUp,
+    Spring,
+    PropellerHat,
+    Jetpack,
+    Platform,
+    DifficultyManager,
+    PlatformManager,
+    Game
+  });
+
+${canvasMarker}`
+  )
+  .replace(gameMarker, `${gameMarker}\n  window.__powerUpTestGame = game;`);
+
+const noop = () => {};
+
+function loadBrowserHarness(seed = "powerup-tests") {
+  let clock = 0;
+  let nextAnimationFrameId = 1;
+  const animationFrames = new Map();
+  const storage = new Map();
+  const context2d = {
+    arc: noop,
+    beginPath: noop,
+    clearRect: noop,
+    closePath: noop,
+    fill: noop,
+    fillRect: noop,
+    fillText: noop,
+    lineTo: noop,
+    moveTo: noop,
+    restore: noop,
+    save: noop,
+    stroke: noop,
+    strokeRect: noop
+  };
+  const canvas = {
+    addEventListener: noop,
+    focus: noop,
+    getContext: () => context2d,
+    height: 720,
+    width: 480
+  };
+  const sandbox = {
+    URLSearchParams,
+    console: { debug: noop, error: noop, info: noop, log: noop, warn: noop },
+    document: { getElementById: (id) => id === "gameCanvas" ? canvas : null },
+    localStorage: {
+      getItem: (key) => storage.has(key) ? storage.get(key) : null,
+      setItem: (key, value) => storage.set(key, String(value))
+    },
+    location: { search: `?platformSeed=${encodeURIComponent(seed)}` },
+    performance: { now: () => clock },
+    requestAnimationFrame(callback) {
+      const id = nextAnimationFrameId;
+      nextAnimationFrameId += 1;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) {
+      animationFrames.delete(id);
+    },
+    addEventListener: noop,
+    removeEventListener: noop
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+
+  vm.createContext(sandbox);
+  vm.runInContext(
+    'Math.random = () => { throw new Error("Seeded code leaked to Math.random"); };',
+    sandbox
+  );
+  vm.runInContext(instrumentedSource, sandbox, { filename: gamePath });
+
+  return {
+    canvas,
+    game: sandbox.__powerUpTestGame,
+    internals: sandbox.__powerUpTestInternals
+  };
+}
+
+function fixedRandom(nextValue = 0, rangeRatio = 0.5) {
+  return {
+    next: () => nextValue,
+    range: (minimum, maximum) => minimum + (maximum - minimum) * rangeRatio,
+    chance: (probability) => nextValue < probability
+  };
+}
+
+function approximately(actual, expected, tolerance = 1e-7, message = "") {
+  assert(
+    Math.abs(actual - expected) <= tolerance,
+    `${message || "values differ"}: expected ${expected}, received ${actual}`
+  );
+}
+
+const harness = loadBrowserHarness();
+const {
+  GameConfig,
+  GameState,
+  PlatformType,
+  ItemType,
+  PlatformPhysics,
+  Player,
+  Item,
+  PowerUp,
+  Spring,
+  PropellerHat,
+  Jetpack,
+  Platform,
+  DifficultyManager,
+  PlatformManager,
+  Game
+} = harness.internals;
+
+function makePlatform(
+  x = 100,
+  y = 300,
+  width = 120,
+  type = PlatformType.NORMAL
+) {
+  return new Platform(x, y, width, type, 0, 0, fixedRandom());
+}
+
+function makeGame() {
+  const game = new Game(harness.canvas);
+  game.state = GameState.PLAYING;
+  return game;
+}
+
+const tests = [];
+function test(name, callback) {
+  tests.push({ name, callback });
+}
+
+test("item hierarchy, type identity, safe placement, and one-item ownership", () => {
+  const platform = makePlatform(80, 320, 132);
+  const spring = new Spring(platform, 20);
+  const propeller = new PropellerHat(platform, fixedRandom(0, 0.5));
+  const jetpack = new Jetpack(platform, fixedRandom(0, 0.5));
+
+  assert(spring instanceof Item);
+  assert(propeller instanceof PowerUp);
+  assert(propeller instanceof Item);
+  assert(jetpack instanceof PowerUp);
+  assert(jetpack instanceof Item);
+  assert.equal(spring.type, ItemType.SPRING);
+  assert.equal(propeller.type, ItemType.PROPELLER_HAT);
+  assert.equal(jetpack.type, ItemType.JETPACK);
+
+  for (const item of [propeller, jetpack]) {
+    const itemCenter = item.x + item.width * 0.5;
+    const platformCenter = platform.x + platform.width * 0.5;
+    approximately(itemCenter, platformCenter, 1e-9, "power-up should be centered");
+    assert.equal(item.y + item.height, platform.y, "item should sit on its platform");
+    assert(item.offsetX >= 6, "item should keep a left inset");
+    assert(
+      item.offsetX + item.width <= platform.width - 6,
+      "item should keep a right inset"
+    );
+  }
+
+  assert.equal(platform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom()), true);
+  const firstItem = platform.item;
+  assert.equal(platform.addPowerUp(ItemType.JETPACK, fixedRandom()), false);
+  assert.equal(platform.item, firstItem, "a platform must never replace its existing item");
+
+  const moving = makePlatform(80, 320, 132, PlatformType.MOVING);
+  const breakable = makePlatform(80, 320, 132, PlatformType.BREAKABLE);
+  assert.equal(moving.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom()), false);
+  assert.equal(breakable.addPowerUp(ItemType.JETPACK, fixedRandom()), false);
+  assert.equal(moving.item, null);
+  assert.equal(breakable.item, null);
+});
+
+test("spawn roll ordering, NORMAL-only placement, opening exclusion, and rarity", () => {
+  const difficulty = new DifficultyManager();
+  const settings = difficulty.getSettings(0, GameConfig.safeOpeningLayers + 1);
+  assert(settings.springChance > GameConfig.propellerSpawnChance);
+  assert(GameConfig.propellerSpawnChance > GameConfig.jetpackSpawnChance);
+
+  const manager = new PlatformManager(difficulty, { seed: "spawn-order" });
+  manager.reset(0, false);
+
+  const opening = makePlatform();
+  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  assert.equal(manager.tryAddFlightPowerUp(opening, GameConfig.safeOpeningLayers), null);
+  assert.equal(opening.item, null);
+
+  for (const type of [PlatformType.MOVING, PlatformType.BREAKABLE]) {
+    const unsafe = makePlatform(100, 300, 120, type);
+    assert.equal(
+      manager.tryAddFlightPowerUp(unsafe, GameConfig.safeOpeningLayers + 30),
+      null
+    );
+    assert.equal(unsafe.item, null);
+  }
+
+  const propellerPlatform = makePlatform();
+  manager.lastFlightPowerUpLayer = -Infinity;
+  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  const propeller = manager.tryAddFlightPowerUp(propellerPlatform, 30);
+  assert.equal(propeller?.type, ItemType.PROPELLER_HAT);
+
+  const jetpackPlatform = makePlatform();
+  manager.lastFlightPowerUpLayer = -Infinity;
+  manager.itemRandom = fixedRandom(
+    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance * 0.5
+  );
+  const jetpack = manager.tryAddFlightPowerUp(jetpackPlatform, 30);
+  assert.equal(jetpack?.type, ItemType.JETPACK);
+
+  const boundaryPlatform = makePlatform();
+  manager.lastFlightPowerUpLayer = -Infinity;
+  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance);
+  assert.equal(
+    manager.tryAddFlightPowerUp(boundaryPlatform, 30)?.type,
+    ItemType.JETPACK,
+    "the propeller interval must precede the jetpack interval"
+  );
+
+  const missPlatform = makePlatform();
+  manager.lastFlightPowerUpLayer = -Infinity;
+  manager.itemRandom = fixedRandom(
+    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance
+  );
+  assert.equal(manager.tryAddFlightPowerUp(missPlatform, 30), null);
+});
+
+test("Propeller and Jetpack share the layer cooldown", () => {
+  const manager = new PlatformManager(new DifficultyManager(), { seed: "cooldown" });
+  manager.reset(0, false);
+
+  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  assert.equal(
+    manager.tryAddFlightPowerUp(makePlatform(), 30)?.type,
+    ItemType.PROPELLER_HAT
+  );
+  assert.equal(manager.lastFlightPowerUpLayer, 30);
+
+  manager.itemRandom = fixedRandom(
+    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance * 0.5
+  );
+  assert.equal(
+    manager.tryAddFlightPowerUp(makePlatform(), 30 + GameConfig.jetpackMinSpawnGap - 1),
+    null,
+    "a recent propeller must block a too-close jetpack"
+  );
+  assert.equal(
+    manager.tryAddFlightPowerUp(makePlatform(), 30 + GameConfig.jetpackMinSpawnGap)?.type,
+    ItemType.JETPACK
+  );
+
+  const jetpackLayer = 30 + GameConfig.jetpackMinSpawnGap;
+  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  assert.equal(
+    manager.tryAddFlightPowerUp(
+      makePlatform(),
+      jetpackLayer + GameConfig.propellerMinSpawnGap - 1
+    ),
+    null,
+    "a recent jetpack must block a too-close propeller"
+  );
+  assert.equal(
+    manager.tryAddFlightPowerUp(
+      makePlatform(),
+      jetpackLayer + GameConfig.propellerMinSpawnGap
+    )?.type,
+    ItemType.PROPELLER_HAT
+  );
+});
+
+test("seeded generation integrates power-ups without weakening the safe route", () => {
+  const manager = new PlatformManager(new DifficultyManager(), {
+    seed: "powerup-generation-integration",
+    debugEnabled: false
+  });
+  manager.reset(0, false);
+
+  const flights = [];
+  for (let index = 0; index < 900; index += 1) {
+    const result = manager.generateNextLayer(Math.min(index * 16, 12000));
+    for (const platform of [result.guaranteed, ...result.fillers]) {
+      if (
+        platform.item?.type === ItemType.PROPELLER_HAT ||
+        platform.item?.type === ItemType.JETPACK
+      ) {
+        flights.push({ layerIndex: platform.layerIndex, item: platform.item, platform });
+      }
+    }
+  }
+
+  assert(flights.length > 0, "seeded generation should produce flight power-ups");
+  assert(
+    flights.some(({ item }) => item.type === ItemType.PROPELLER_HAT),
+    "seeded generation should exercise Propeller Hat"
+  );
+  assert(
+    flights.some(({ item }) => item.type === ItemType.JETPACK),
+    "seeded generation should exercise Jetpack"
+  );
+
+  for (let index = 0; index < flights.length; index += 1) {
+    const current = flights[index];
+    assert.equal(current.platform.type, PlatformType.NORMAL);
+    assert.equal(current.platform.isGuaranteed, true);
+    assert(current.layerIndex > GameConfig.safeOpeningLayers);
+    assert.equal(current.platform.item, current.item);
+    assert.equal(current.item.collected, false);
+    assert(
+      Math.abs(
+        current.item.x + current.item.width * 0.5 -
+          (current.platform.x + current.platform.width * 0.5)
+      ) <= 6 + 1e-9
+    );
+
+    if (index > 0) {
+      const previous = flights[index - 1];
+      const requiredGap = current.item.type === ItemType.PROPELLER_HAT
+        ? GameConfig.propellerMinSpawnGap
+        : GameConfig.jetpackMinSpawnGap;
+      assert(
+        current.layerIndex - previous.layerIndex >= requiredGap,
+        `shared cooldown violated between layers ${previous.layerIndex} and ${current.layerIndex}`
+      );
+    }
+  }
+
+  const validation = PlatformManager.validateGeneratedPlatforms(900, "powerup-route-check");
+  assert.equal(validation.unreachableGuaranteed, 0);
+  assert.equal(validation.outsidePlatforms, 0);
+  assert.equal(validation.overlappingPlatforms, 0);
+  assert.equal(validation.verticalGapViolations, 0);
+  assert.equal(validation.horizontalReachViolations, 0);
+  assert.equal(validation.layerCountViolations, 0);
+  assert.equal(validation.generationFailures, 0);
+});
+
+test("aggregate generation keeps Spring more common than Propeller and Jetpack", () => {
+  const totals = {
+    [ItemType.SPRING]: 0,
+    [ItemType.PROPELLER_HAT]: 0,
+    [ItemType.JETPACK]: 0
+  };
+
+  for (let seed = 0; seed < 8; seed += 1) {
+    const manager = new PlatformManager(new DifficultyManager(), {
+      seed: `rarity-${seed}`,
+      debugEnabled: false
+    });
+    manager.reset(0, false);
+    for (let layer = 0; layer < 1000; layer += 1) {
+      manager.generateNextLayer(Math.min(layer * 16, 12000));
+      manager.platforms = manager.platforms.filter(
+        (platform) => platform.y < manager.highestGeneratedY + GameConfig.height
+      );
+    }
+    for (const type of Object.keys(totals)) {
+      totals[type] += manager.stats.itemsGenerated[type];
+    }
+  }
+
+  assert(totals[ItemType.JETPACK] > 0, "the rarest item must still be generated");
+  assert(
+    totals[ItemType.SPRING] > totals[ItemType.PROPELLER_HAT] &&
+      totals[ItemType.PROPELLER_HAT] > totals[ItemType.JETPACK],
+    `unexpected item frequency order: ${JSON.stringify(totals)}`
+  );
+});
+
+test("overlap pickup is swept, immediate, single-use, and replaces P and J safely", () => {
+  const game = makeGame();
+  const platform = makePlatform(120, 330, 130);
+  assert.equal(platform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom()), true);
+  const propeller = platform.item;
+  game.platformManager.platforms = [platform];
+  game.player.x = propeller.x;
+  game.player.previousX = propeller.x;
+  game.player.previousY = propeller.y + propeller.height + 30;
+  game.player.y = propeller.y - game.player.height - 30;
+
+  assert.equal(game.resolvePowerUpPickups(), propeller);
+  assert.equal(propeller.collected, true);
+  assert.equal(platform.item, null, "a collected item must disappear immediately");
+  assert.equal(game.player.activePowerUp, ItemType.PROPELLER_HAT);
+  assert.equal(game.player.powerUpTimer, GameConfig.propellerDuration);
+
+  const timerAfterPickup = game.player.powerUpTimer;
+  assert.equal(game.resolvePowerUpPickups(), null);
+  assert.equal(game.player.powerUpTimer, timerAfterPickup, "pickup must not retrigger");
+
+  const jetpackPlatform = makePlatform(120, 330, 130);
+  jetpackPlatform.addPowerUp(ItemType.JETPACK, fixedRandom());
+  const jetpack = jetpackPlatform.item;
+  game.platformManager.platforms = [jetpackPlatform];
+  game.player.x = jetpack.x;
+  game.player.previousX = jetpack.x;
+  game.player.y = jetpack.y;
+  game.player.previousY = jetpack.y;
+  assert.equal(game.resolvePowerUpPickups(), jetpack);
+  assert.equal(game.player.activePowerUp, ItemType.JETPACK);
+  assert.equal(game.player.powerUpTimer, GameConfig.jetpackDuration);
+  assert.equal(game.player.powerUpFlightSpeed, GameConfig.jetpackFlightSpeed);
+
+  const replacementPlatform = makePlatform(120, 330, 130);
+  replacementPlatform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());
+  game.platformManager.platforms = [replacementPlatform];
+  game.player.x = replacementPlatform.item.x;
+  game.player.previousX = game.player.x;
+  game.player.y = replacementPlatform.item.y;
+  game.player.previousY = game.player.y;
+  assert.equal(game.resolvePowerUpPickups()?.type, ItemType.PROPELLER_HAT);
+  assert.equal(game.player.activePowerUp, ItemType.PROPELLER_HAT);
+  assert.equal(game.player.powerUpTimer, GameConfig.propellerDuration);
+  assert.equal(game.player.powerUpFlightSpeed, GameConfig.propellerFlightSpeed);
+});
+
+test("the real Game.update pickup path suppresses a same-frame platform bounce", () => {
+  const game = makeGame();
+  const platform = makePlatform(120, 330, 130);
+  platform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());
+  const item = platform.item;
+  game.platformManager.platforms = [platform];
+  game.platformManager.ensurePlatforms = () => {};
+  game.player.reset(item.x, platform.y - game.player.height - 5);
+  game.player.vy = 300;
+
+  game.update(1 / 60);
+
+  assert.equal(platform.item, null);
+  assert.equal(game.player.activePowerUp, ItemType.PROPELLER_HAT);
+  assert.equal(game.player.vy, -GameConfig.propellerFlightSpeed);
+  assert.notEqual(game.player.vy, -GameConfig.jumpPower);
+  assert.notEqual(game.player.vy, -GameConfig.jumpPower * GameConfig.springJumpMultiplier);
+});
+
+test("timed flight has exact rise, ignores gravity, and returns naturally to gravity", () => {
+  assert(GameConfig.jetpackFlightSpeed > GameConfig.propellerFlightSpeed);
+  assert(
+    GameConfig.jetpackFlightSpeed * GameConfig.jetpackDuration >
+      GameConfig.propellerFlightSpeed * GameConfig.propellerDuration
+  );
+
+  const propellerPlayer = new Player(100, 2000);
+  propellerPlayer.vy = GameConfig.maxFallSpeed;
+  const propellerStartY = propellerPlayer.y;
+  assert.equal(propellerPlayer.activatePowerUp(ItemType.PROPELLER_HAT), true);
+  assert.equal(propellerPlayer.y, propellerStartY, "activation must not teleport the player");
+  propellerPlayer.update(GameConfig.propellerDuration, 0);
+  approximately(
+    propellerPlayer.y,
+    propellerStartY - GameConfig.propellerFlightSpeed * GameConfig.propellerDuration,
+    1e-6,
+    "Propeller Hat total rise"
+  );
+  assert.equal(propellerPlayer.activePowerUp, null);
+  assert.equal(propellerPlayer.isFlying, false);
+  assert.equal(propellerPlayer.powerUpTimer, 0);
+  assert.equal(propellerPlayer.vy, 0);
+  assert.equal(propellerPlayer.powerUpEndedThisFrame, true);
+
+  const gravityStep = 0.1;
+  const yAtFlightEnd = propellerPlayer.y;
+  propellerPlayer.update(gravityStep, 0);
+  approximately(propellerPlayer.vy, GameConfig.gravity * gravityStep);
+  approximately(
+    propellerPlayer.y,
+    yAtFlightEnd + GameConfig.gravity * gravityStep * gravityStep
+  );
+
+  const jetpackPlayer = new Player(100, 2400);
+  const jetpackStartY = jetpackPlayer.y;
+  jetpackPlayer.activatePowerUp(ItemType.JETPACK);
+  jetpackPlayer.update(GameConfig.jetpackDuration + gravityStep, 0);
+  approximately(
+    jetpackPlayer.y,
+    jetpackStartY - GameConfig.jetpackFlightSpeed * GameConfig.jetpackDuration +
+      GameConfig.gravity * gravityStep * gravityStep,
+    1e-6,
+    "a frame crossing the timer boundary must integrate flight and gravity separately"
+  );
+  approximately(jetpackPlayer.vy, GameConfig.gravity * gravityStep);
+  assert.equal(jetpackPlayer.powerUpEndedThisFrame, true);
+
+  for (const [type, duration, speed] of [
+    [ItemType.PROPELLER_HAT, GameConfig.propellerDuration, GameConfig.propellerFlightSpeed],
+    [ItemType.JETPACK, GameConfig.jetpackDuration, GameConfig.jetpackFlightSpeed]
+  ]) {
+    for (const framesPerSecond of [30, 60, 144]) {
+      const player = new Player(100, 3000);
+      const startY = player.y;
+      player.activatePowerUp(type);
+      while (player.isFlying) {
+        const step = Math.min(1 / framesPerSecond, player.powerUpTimer);
+        const previousY = player.y;
+        player.update(step, 0);
+        assert(
+          previousY - player.y <= speed * step + 1e-6,
+          "a flight frame must not teleport farther than its time step"
+        );
+      }
+      approximately(
+        startY - player.y,
+        speed * duration,
+        1e-6,
+        `${type} rise at ${framesPerSecond} FPS`
+      );
+      assert.equal(player.vy, 0);
+    }
+  }
+});
+
+test("horizontal control and full-width wrap remain active during flight", () => {
+  const player = new Player(100, 400);
+  player.activatePowerUp(ItemType.PROPELLER_HAT);
+  const startY = player.y;
+  player.update(0.1, 1);
+  approximately(player.vx, 220);
+  approximately(player.x, 122);
+  approximately(player.y, startY - GameConfig.propellerFlightSpeed * 0.1);
+  assert.equal(player.vy, -GameConfig.propellerFlightSpeed);
+
+  player.x = GameConfig.width - 1;
+  player.vx = GameConfig.maxMoveSpeed;
+  player.update(0.1, 1);
+  assert.equal(player.x, -player.width);
+  assert.equal(player.previousX, -player.width);
+  assert.equal(player.isFlying, true);
+
+  const leftWrappingPlayer = new Player(-GameConfig.playerWidth + 1, 400);
+  leftWrappingPlayer.activatePowerUp(ItemType.JETPACK);
+  leftWrappingPlayer.vx = -GameConfig.maxMoveSpeed;
+  leftWrappingPlayer.update(0.1, -1);
+  assert.equal(leftWrappingPlayer.x, GameConfig.width);
+  assert.equal(leftWrappingPlayer.previousX, GameConfig.width);
+  assert.equal(leftWrappingPlayer.isFlying, true);
+});
+
+test("platform and Spring bounce are suppressed in flight, then Spring works normally", () => {
+  const game = makeGame();
+  const breakable = makePlatform(100, 300, 130, PlatformType.BREAKABLE);
+  game.platformManager.platforms = [breakable];
+  game.player.reset(120, 265);
+  game.player.previousY = 240;
+  game.player.activatePowerUp(ItemType.PROPELLER_HAT);
+  game.player.vy = 500;
+  const flyingY = game.player.y;
+  game.resolveLandings();
+  assert.equal(game.player.y, flyingY);
+  assert.equal(game.player.vy, 500);
+  assert.equal(breakable.breaking, false);
+
+  const springPlatform = makePlatform(100, 300, 130);
+  springPlatform.addSpring(fixedRandom());
+  game.platformManager.platforms = [springPlatform];
+  game.player.x = springPlatform.item.x;
+  game.player.previousY = springPlatform.item.y - game.player.height - 6;
+  game.player.y = springPlatform.item.y - game.player.height + 5;
+  game.player.vy = 500;
+  game.resolveLandings();
+  assert.equal(game.player.vy, 500, "Spring must not launch during flight");
+
+  game.player.launch(GameConfig.springJumpMultiplier);
+  assert.equal(game.player.vy, 500, "direct launch calls must also be ignored in flight");
+
+  game.player.clearPowerUp();
+  game.player.previousY = springPlatform.item.y - game.player.height - 6;
+  game.player.y = springPlatform.item.y - game.player.height + 5;
+  game.player.vy = 500;
+  game.resolveLandings();
+  approximately(game.player.vy, -GameConfig.jumpPower * GameConfig.springJumpMultiplier);
+  approximately(game.player.y, springPlatform.item.y - game.player.height);
+});
+
+test("camera, height score, and dynamic generation track fast flight continuously", () => {
+  const game = makeGame();
+  for (const platform of game.platformManager.platforms) {
+    if (platform.item?.type !== ItemType.SPRING) {
+      platform.item = null;
+    }
+  }
+  const thresholdY = GameConfig.height * GameConfig.cameraThreshold;
+  game.player.y = thresholdY - 10;
+  game.player.previousY = game.player.y;
+  game.player.activatePowerUp(ItemType.JETPACK);
+
+  game.update(0.1);
+  const firstCameraOffset = game.cameraOffset;
+  approximately(game.player.y, thresholdY);
+  approximately(firstCameraOffset, 10 + GameConfig.jetpackFlightSpeed * 0.1);
+  assert.equal(
+    game.score,
+    Math.floor(game.cameraOffset + Math.max(0, game.startPlayerY - game.player.y)),
+    "flight must use the ordinary height score and no item bonus"
+  );
+  let reserve = game.player.remainingFlightDistance +
+    PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio;
+  assert(
+    game.platformManager.highestGeneratedY <=
+      -GameConfig.height * GameConfig.spawnAheadScreens - reserve + 1e-6,
+    "generation must stay ahead of the remaining flight distance"
+  );
+
+  game.update(0.1);
+  approximately(game.player.y, thresholdY);
+  approximately(game.cameraOffset - firstCameraOffset, GameConfig.jetpackFlightSpeed * 0.1);
+  assert(game.cameraOffset > firstCameraOffset);
+  reserve = game.player.remainingFlightDistance +
+    PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio;
+  assert(
+    game.platformManager.highestGeneratedY <=
+      -GameConfig.height * GameConfig.spawnAheadScreens - reserve + 1e-6
+  );
+});
+
+test("flight completion provides a nearby safe recovery landing and continuation", () => {
+  const game = makeGame();
+  for (const platform of game.platformManager.platforms) {
+    if (platform.item?.type !== ItemType.SPRING) {
+      platform.item = null;
+    }
+  }
+  const thresholdY = GameConfig.height * GameConfig.cameraThreshold;
+  game.player.x = (GameConfig.width - game.player.width) * 0.5;
+  game.player.y = thresholdY;
+  game.player.previousX = game.player.x;
+  game.player.previousY = game.player.y;
+  game.player.activatePowerUp(ItemType.PROPELLER_HAT);
+  game.player.powerUpTimer = 0.05;
+  const recoveryEventsBefore =
+    game.platformManager.stats.recoveryPlatformsCreated +
+    game.platformManager.stats.recoveryPlatformsReused;
+
+  game.update(0.1);
+  assert.equal(game.player.isFlying, false);
+  assert(game.player.vy > 0, "gravity should resume in the timer-overrun portion");
+  const recoveryEventsAfter =
+    game.platformManager.stats.recoveryPlatformsCreated +
+    game.platformManager.stats.recoveryPlatformsReused;
+  assert.equal(recoveryEventsAfter, recoveryEventsBefore + 1);
+
+  const playerBottom = game.player.y + game.player.height;
+  const safeLandings = game.platformManager.platforms.filter((platform) =>
+    platform.type === PlatformType.NORMAL &&
+    !platform.breaking &&
+    !platform.removed &&
+    platform.y >= playerBottom + 48 - 1e-6 &&
+    platform.y <= playerBottom + 240 + 1e-6 &&
+    (!platform.item || platform.item.type === ItemType.SPRING) &&
+    game.platformManager.getWrappedHorizontalOverlap(
+      game.player.x,
+      game.player.width,
+      platform.x,
+      platform.width
+    ) >= GameConfig.minimumLandingOverlap
+  );
+  assert(safeLandings.length > 0, "a safe platform must be below the flight endpoint");
+  assert(
+    safeLandings.some((platform) => game.platformManager.hasGuaranteedContinuation(platform)),
+    "the recovery landing must connect back to the guaranteed route"
+  );
+
+  let bounced = false;
+  for (let frame = 0; frame < 180 && game.state === GameState.PLAYING; frame += 1) {
+    game.update(1 / 60);
+    if (game.player.vy < 0) {
+      bounced = true;
+      break;
+    }
+  }
+  assert.equal(bounced, true, "the player should naturally fall onto a recovery landing");
+  assert.equal(game.state, GameState.PLAYING);
+});
+
+test("recovery placement is robust across seeds and wrapped endpoint positions", () => {
+  for (let seed = 0; seed < 24; seed += 1) {
+    for (const playerX of [-GameConfig.playerWidth + 1, 0, 223, GameConfig.width - 1]) {
+      const manager = new PlatformManager(new DifficultyManager(), {
+        seed: `recovery-${seed}-${playerX}`,
+        debugEnabled: false
+      });
+      manager.reset(0, true);
+      manager.scroll(GameConfig.height * 1.4);
+      manager.cleanupPlatforms();
+      manager.ensurePlatforms(1000, GameConfig.jetpackFlightSpeed * GameConfig.jetpackDuration);
+
+      const player = new Player(playerX, GameConfig.height * GameConfig.cameraThreshold);
+      const metadataBefore = {
+        highestGeneratedY: manager.highestGeneratedY,
+        lastGuaranteedPlatform: manager.lastGuaranteedPlatform,
+        layerIndex: manager.layerIndex
+      };
+      const platformsBefore = manager.platforms.slice();
+      const recovery = manager.ensureFlightExitPlatform(player);
+
+      assert(recovery, `missing recovery for seed ${seed} at x=${playerX}`);
+      assert.equal(recovery.type, PlatformType.NORMAL);
+      assert.equal(recovery.breaking, false);
+      assert.equal(recovery.removed, false);
+      assert(
+        manager.getWrappedHorizontalOverlap(
+          player.x,
+          player.width,
+          recovery.x,
+          recovery.width
+        ) >= GameConfig.minimumLandingOverlap
+      );
+      assert.equal(
+        manager.hasGuaranteedContinuation(recovery),
+        true,
+        `recovery did not reconnect for seed ${seed} at x=${playerX}: ${JSON.stringify({
+          recovery: {
+            x: recovery.x,
+            y: recovery.y,
+            width: recovery.width,
+            isRecovery: recovery.isRecovery
+          },
+          nearbyGuaranteed: manager.platforms
+            .filter((platform) => platform.isGuaranteed && platform.y < recovery.y)
+            .sort((first, second) => second.y - first.y)
+            .slice(0, 3)
+            .map((platform) => ({
+              x: platform.x,
+              y: platform.y,
+              width: platform.width,
+              reach: PlatformPhysics.getReachability(recovery, platform, true)
+            }))
+        })}`
+      );
+      assert.equal(manager.highestGeneratedY, metadataBefore.highestGeneratedY);
+      assert.equal(manager.lastGuaranteedPlatform, metadataBefore.lastGuaranteedPlatform);
+      assert.equal(manager.layerIndex, metadataBefore.layerIndex);
+
+      if (recovery.isRecovery) {
+        assert.equal(recovery.item, null);
+        assert(
+          platformsBefore.every((platform) => !manager.platformsAreTooClose(recovery, platform)),
+          "a created recovery platform must not overlap the generated layout"
+        );
+      }
+    }
+  }
+});
+
+test("game over, restart, collection, and cleanup leave no active stale state", () => {
+  const game = makeGame();
+  game.player.activatePowerUp(ItemType.JETPACK);
+  game.finishGame();
+  assert.equal(game.state, GameState.GAME_OVER);
+  assert.equal(game.player.activePowerUp, null);
+  assert.equal(game.player.powerUpTimer, 0);
+
+  const stalePlatform = makePlatform(100, 300, 130);
+  stalePlatform.isRecovery = true;
+  stalePlatform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());
+  game.platformManager.platforms.push(stalePlatform);
+  game.player.activatePowerUp(ItemType.PROPELLER_HAT);
+  game.startGame();
+  assert.equal(game.state, GameState.PLAYING);
+  assert.equal(game.player.activePowerUp, null);
+  assert.equal(game.player.powerUpTimer, 0);
+  assert.equal(game.player.isFlying, false);
+  assert.equal(game.platformManager.platforms.includes(stalePlatform), false);
+  assert.equal(game.platformManager.stats.recoveryPlatformsCreated, 0);
+  assert.equal(game.platformManager.stats.recoveryPlatformsReused, 0);
+
+  const manager = new PlatformManager(new DifficultyManager(), { seed: "cleanup" });
+  manager.reset(0, false);
+  const expiredPlatform = makePlatform(
+    100,
+    GameConfig.height + GameConfig.cleanupMargin + 1,
+    130
+  );
+  expiredPlatform.addPowerUp(ItemType.JETPACK, fixedRandom());
+  manager.platforms.push(expiredPlatform);
+  manager.cleanupPlatforms();
+  assert.equal(manager.platforms.includes(expiredPlatform), false);
+
+  const collectiblePlatform = makePlatform();
+  collectiblePlatform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());
+  const collectible = collectiblePlatform.item;
+  assert.equal(collectible.collect(), true);
+  assert.equal(collectible.collect(), false);
+  assert.equal(collectiblePlatform.item, null);
+
+  let maximumLivePlatforms = 0;
+  for (let step = 0; step < 240; step += 1) {
+    manager.scroll(GameConfig.height * 0.25);
+    manager.update(0);
+    manager.ensurePlatforms(step * 100);
+    maximumLivePlatforms = Math.max(maximumLivePlatforms, manager.platforms.length);
+    for (const platform of manager.platforms) {
+      if (platform.item) {
+        assert.equal(platform.item.platform, platform);
+        assert.equal(platform.item.collected, false);
+      }
+    }
+  }
+  assert(maximumLivePlatforms < 50, `live platform count grew to ${maximumLivePlatforms}`);
+});
+
+let passed = 0;
+for (const { name, callback } of tests) {
+  try {
+    callback();
+    passed += 1;
+    console.log(`PASS ${name}`);
+  } catch (error) {
+    console.error(`FAIL ${name}`);
+    throw error;
+  }
+}
+
+console.log(`\n${passed}/${tests.length} power-up tests passed.`);
+
+if (process.argv.includes("--find-preload-seeds")) {
+  const found = {
+    [ItemType.PROPELLER_HAT]: null,
+    [ItemType.JETPACK]: null
+  };
+  for (let seed = 0; seed < 10000; seed += 1) {
+    const manager = new PlatformManager(new DifficultyManager(), {
+      seed: String(seed),
+      debugEnabled: false
+    });
+    manager.reset(0, true);
+    for (const platform of manager.platforms) {
+      if (
+        platform.item &&
+        Object.prototype.hasOwnProperty.call(found, platform.item.type) &&
+        (!found[platform.item.type] || platform.layerIndex < found[platform.item.type].layer)
+      ) {
+        found[platform.item.type] = {
+          seed: String(seed),
+          layer: platform.layerIndex,
+          y: Math.round(platform.y * 10) / 10
+        };
+      }
+    }
+    if (Object.values(found).every((entry) => entry?.layer === GameConfig.safeOpeningLayers + 1)) {
+      break;
+    }
+  }
+  console.log("PRELOAD_SEEDS", JSON.stringify(found));
+}
