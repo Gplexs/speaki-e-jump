@@ -135,6 +135,7 @@ function copyPlatform(platform, scrollOffset) {
     generationScore: platform.generationScore,
     itemType: platform.item?.type || null,
     height: platform.height,
+    isBreakable: Boolean(platform.isBreakable),
     isGuaranteed: Boolean(platform.isGuaranteed),
     layerIndex: platform.layerIndex,
     moveMax: platform.moveMax,
@@ -173,6 +174,7 @@ function signature(platforms, layerLimit = Infinity) {
       round(platform.worldY),
       round(platform.width),
       platform.type,
+      platform.isBreakable,
       platform.itemType,
       platform.allowWrappingFromPrevious,
       platform.generationFallback
@@ -531,6 +533,18 @@ function validateGeneratedPlatforms(run) {
     );
   }
 
+  const movingPlatforms = generated.filter(
+    (platform) => platform.type === PlatformType.MOVING
+  );
+  const movingBreakables = movingPlatforms.filter(
+    (platform) => platform.isBreakable
+  );
+  const generatedMovingBreakableRate = movingBreakables.length / movingPlatforms.length;
+  assert(
+    generatedMovingBreakableRate >= 0.1 && generatedMovingBreakableRate <= 0.3,
+    `generated moving BREAKABLE rate ${generatedMovingBreakableRate} is not near 20%`
+  );
+
   return {
     averageDensity: round(averageDensity, 3),
     breakableEligible,
@@ -545,6 +559,9 @@ function validateGeneratedPlatforms(run) {
     maxVerticalGap: round(Math.max(...verticalGaps), 3),
     minSafeHorizontalTravel: round(Math.min(...safeHorizontalTravels), 3),
     minVerticalGap: round(Math.min(...verticalGaps), 3),
+    movingBreakableCount: movingBreakables.length,
+    movingBreakableRate: round(generatedMovingBreakableRate, 4),
+    movingPlatformCount: movingPlatforms.length,
     outOfBounds,
     overlapCount,
     unreachable
@@ -855,6 +872,120 @@ function validateOpeningRoutes() {
   };
 }
 
+function validateDifficultyTransitions() {
+  const harness = makeBrowserHarness("difficulty-transition-seed");
+  const {
+    GameConfig,
+    DifficultyManager,
+    Platform,
+    PlatformManager,
+    PlatformType
+  } = harness.internals;
+  const difficulty = new DifficultyManager();
+  const gameplayLayer = GameConfig.safeOpeningLayers + 1;
+  const earlySettings = difficulty.getSettings(
+    GameConfig.earlyFillerScoreThreshold,
+    gameplayLayer
+  );
+  const laterSettings = difficulty.getSettings(
+    GameConfig.earlyFillerScoreThreshold + 1,
+    gameplayLayer
+  );
+
+  assert.equal(earlySettings.earlyAssistance, true);
+  assert.equal(earlySettings.oneFillerChance, GameConfig.earlyOneFillerChance);
+  assert.equal(earlySettings.twoFillerChance, GameConfig.earlyTwoFillerChance);
+  assert.equal(laterSettings.earlyAssistance, false);
+  assert(
+    earlySettings.oneFillerChance + earlySettings.twoFillerChance >
+      laterSettings.oneFillerChance + laterSettings.twoFillerChance,
+    "early-game filler chance did not increase"
+  );
+
+  const earlyManager = new PlatformManager(difficulty, {
+    seed: "early-filler-density",
+    debugEnabled: false
+  });
+  earlyManager.reset(0, false);
+  let earlyFillerCount = 0;
+  const earlyLayerCount = 600;
+  for (let index = 0; index < earlyLayerCount; index += 1) {
+    const layer = earlyManager.generateNextLayer(GameConfig.earlyFillerScoreThreshold);
+    earlyFillerCount += layer.fillers.length;
+    for (const filler of layer.fillers) {
+      assert.equal(filler.type, PlatformType.NORMAL);
+      assert.equal(filler.isBreakable, false);
+    }
+    earlyManager.platforms = earlyManager.platforms.filter(
+      (platform) => platform.y < earlyManager.highestGeneratedY + GameConfig.height
+    );
+  }
+  const averageEarlyFillers = earlyFillerCount / earlyLayerCount;
+  assert(
+    averageEarlyFillers >= 0.65,
+    `early route averaged only ${averageEarlyFillers} filler platforms per layer`
+  );
+
+  const movingManager = new PlatformManager(difficulty, {
+    seed: "moving-breakable-rate",
+    debugEnabled: false
+  });
+  movingManager.reset(0, false);
+  let movingBreakables = 0;
+  const movingSampleCount = 5000;
+  for (let index = 0; index < movingSampleCount; index += 1) {
+    const moving = new Platform(
+      100,
+      300,
+      120,
+      PlatformType.MOVING,
+      30,
+      60,
+      movingManager.random
+    );
+    if (movingManager.applyMovingPlatformDifficulty(moving)) {
+      movingBreakables += 1;
+      assert.equal(moving.type, PlatformType.MOVING);
+      assert.equal(moving.isBreakable, true);
+    }
+  }
+  const movingBreakableRate = movingBreakables / movingSampleCount;
+  assert(
+    movingBreakableRate >= 0.18 && movingBreakableRate <= 0.22,
+    `moving BREAKABLE rate ${movingBreakableRate} is not near 20%`
+  );
+  assert.equal(movingManager.stats.movingBreakablesGenerated, movingBreakables);
+
+  movingManager.movingBreakableRandom = { chance: () => true };
+  const collapsingMover = new Platform(
+    100,
+    300,
+    120,
+    PlatformType.MOVING,
+    30,
+    60,
+    movingManager.random
+  );
+  assert.equal(movingManager.applyMovingPlatformDifficulty(collapsingMover), true);
+  const startX = collapsingMover.x;
+  collapsingMover.update(0.1);
+  assert.notEqual(collapsingMover.x, startX, "moving platform did not move before landing");
+  collapsingMover.beginBreaking();
+  const breakingX = collapsingMover.x;
+  collapsingMover.update(GameConfig.breakDelay);
+  assert.equal(collapsingMover.x, breakingX, "collapsing platform kept moving");
+  assert.equal(collapsingMover.removed, true);
+
+  return {
+    averageEarlyFillers: round(averageEarlyFillers, 3),
+    earlyFillerCount,
+    earlyLayerCount,
+    movingBreakableRate: round(movingBreakableRate, 4),
+    movingBreakables,
+    movingSampleCount
+  };
+}
+
 function validateProductionBatch(PlatformManager) {
   const seedCount = Number.parseInt(process.env.BATCH_SEEDS || "32", 10);
   assert(Number.isInteger(seedCount) && seedCount >= 1);
@@ -944,6 +1075,7 @@ assert.notDeepEqual(
 
 const animationLoop = validateAnimationLoop();
 const forcedFallback = validateForcedFallback();
+const difficultyTransitions = validateDifficultyTransitions();
 const openingRoutes = validateOpeningRoutes();
 const realPhysicsLandings = validateRealPhysicsLandings();
 const productionBatch = validateProductionBatch(
@@ -952,6 +1084,7 @@ const productionBatch = validateProductionBatch(
 const output = {
   ...report,
   animationLoop,
+  difficultyTransitions,
   forcedFallback,
   generatedAboveViewportChecks: mainRun.generatedAboveViewportChecks,
   maxActivePlatforms: mainRun.maxActivePlatforms,

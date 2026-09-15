@@ -19,6 +19,10 @@
     jetpackMinSpawnGap: 22,
     guaranteedBreakableScoreThreshold: 8000,
     guaranteedBreakableChance: 0.25,
+    movingBreakableChance: 0.2,
+    earlyFillerScoreThreshold: 3000,
+    earlyOneFillerChance: 0.6,
+    earlyTwoFillerChance: 0.25,
     moveAcceleration: 2200,
     horizontalFriction: 8,
     maxMoveSpeed: 330,
@@ -602,6 +606,7 @@
       this.height = GameConfig.platformHeight;
       this.type = type;
       this.item = null;
+      this.isBreakable = type === PlatformType.BREAKABLE;
       this.breaking = false;
       this.breakTimer = 0;
       this.removed = false;
@@ -647,7 +652,7 @@
     }
 
     beginBreaking() {
-      if (this.type === PlatformType.BREAKABLE && !this.breaking) {
+      if (this.isBreakable && !this.breaking) {
         this.breaking = true;
         this.breakTimer = GameConfig.breakDelay;
       }
@@ -680,6 +685,7 @@
       const maximumJumpHeight = PlatformPhysics.getMaximumJumpHeight();
       const safeVerticalReach = maximumJumpHeight * GameConfig.safeVerticalGapRatio;
       const opening = layerIndex <= GameConfig.safeOpeningLayers;
+      const earlyAssistance = score <= GameConfig.earlyFillerScoreThreshold;
 
       const minGap = opening
         ? GameConfig.openingMinVerticalGap
@@ -694,6 +700,7 @@
       return {
         level,
         opening,
+        earlyAssistance,
         minGap,
         maxGap,
         minWidth: opening ? 102 : lerp(94, 72, level),
@@ -701,8 +708,12 @@
         movingChance: lerp(0.06, 0.23, level),
         breakableChance: lerp(0.04, 0.18, level),
         springChance: lerp(0.05, 0.1, level),
-        oneFillerChance: opening ? 0.1 : lerp(0.22, 0.18, level),
-        twoFillerChance: opening ? 0.01 : lerp(0.04, 0.025, level),
+        oneFillerChance: earlyAssistance
+          ? GameConfig.earlyOneFillerChance
+          : lerp(0.22, 0.18, level),
+        twoFillerChance: earlyAssistance
+          ? GameConfig.earlyTwoFillerChance
+          : lerp(0.04, 0.025, level),
         wrapChance: opening ? 0 : lerp(0.12, 0.28, level),
         maximumJumpHeight,
         safeVerticalReach
@@ -726,6 +737,10 @@
         ? null
         : `${this.seed}:route-types`;
       this.routeTypeRandom = new RandomSource(this.routeTypeSeed);
+      this.movingBreakableSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:moving-breakables`;
+      this.movingBreakableRandom = new RandomSource(this.movingBreakableSeed);
       this.platforms = [];
       this.generatedCount = 0;
       this.layerIndex = 0;
@@ -745,6 +760,7 @@
         fallbackCount: 0,
         skippedFillers: 0,
         guaranteedBreakablesGenerated: 0,
+        movingBreakablesGenerated: 0,
         itemsGenerated: {
           [ItemType.SPRING]: 0,
           [ItemType.PROPELLER_HAT]: 0,
@@ -768,6 +784,7 @@
       this.random.reset(this.seed);
       this.itemRandom.reset(this.itemSeed);
       this.routeTypeRandom.reset(this.routeTypeSeed);
+      this.movingBreakableRandom.reset(this.movingBreakableSeed);
       this.generatedCount = 1;
       this.layerIndex = 0;
       this.recentGuaranteed.length = 0;
@@ -911,7 +928,21 @@
       }
 
       platform.type = PlatformType.BREAKABLE;
+      platform.isBreakable = true;
       this.stats.guaranteedBreakablesGenerated += 1;
+      return true;
+    }
+
+    applyMovingPlatformDifficulty(platform) {
+      if (
+        platform.type !== PlatformType.MOVING ||
+        !this.movingBreakableRandom.chance(GameConfig.movingBreakableChance)
+      ) {
+        return false;
+      }
+
+      platform.isBreakable = true;
+      this.stats.movingBreakablesGenerated += 1;
       return true;
     }
 
@@ -1249,7 +1280,7 @@
           }
 
           let type = PlatformType.NORMAL;
-          if (!settings.opening) {
+          if (!settings.opening && !settings.earlyAssistance) {
             const typeRoll = this.random.next();
             if (typeRoll < settings.movingChance) {
               type = PlatformType.MOVING;
@@ -1299,6 +1330,7 @@
           ) {
             this.stats.itemsGenerated[ItemType.SPRING] += 1;
           }
+          this.applyMovingPlatformDifficulty(candidate);
           created = candidate;
           break;
         }
@@ -1612,6 +1644,7 @@
         fallbackCount: manager.stats.fallbackCount,
         skippedFillers: manager.stats.skippedFillers,
         guaranteedBreakablesGenerated: manager.stats.guaranteedBreakablesGenerated,
+        movingBreakablesGenerated: manager.stats.movingBreakablesGenerated,
         itemsGenerated: { ...manager.stats.itemsGenerated },
         maximumJumpHeight: round(PlatformPhysics.getMaximumJumpHeight()),
         safeVerticalReach: round(
@@ -1700,7 +1733,7 @@
       context.fillStyle = colorByType[platform.type];
       context.fillRect(platform.x, platform.y, platform.width, platform.height);
 
-      if (platform.type === PlatformType.BREAKABLE) {
+      if (platform.isBreakable) {
         context.fillStyle = this.colors.background;
         context.fillRect(platform.x + platform.width * 0.48, platform.y, 3, platform.height);
       }
@@ -2120,6 +2153,7 @@
           fallbackCount: this.platformManager.stats.fallbackCount,
           guaranteedBreakablesGenerated:
             this.platformManager.stats.guaranteedBreakablesGenerated,
+          movingBreakablesGenerated: this.platformManager.stats.movingBreakablesGenerated,
           itemsGenerated: {
             ...this.platformManager.stats.itemsGenerated
           },
@@ -2142,6 +2176,7 @@
           y: Math.round(platform.y * 100) / 100,
           width: Math.round(platform.width * 100) / 100,
           type: platform.type,
+          isBreakable: platform.isBreakable,
           itemType: platform.item?.type || null,
           hasSpring: platform.item?.type === ItemType.SPRING,
           breaking: platform.breaking,

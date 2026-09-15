@@ -22,6 +22,8 @@ The player jumps automatically whenever it lands on a platform.
 - Opening route choices safely rejoin the next guaranteed platform
 - Controlled variation across platform height, spacing, and screen position
 - Normal, horizontally moving, and breakable platforms
+- Moving platforms have a 20% chance to also collapse after landing
+- Extra normal platforms make the route more forgiving through 3,000 points
 - Guaranteed Path platforms become breakable at a 25% rate from 8,000 points
 - Spring items with a stronger jump
 - Timed Propeller Hat and Jetpack flight power-ups on safe normal platforms
