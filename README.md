@@ -25,8 +25,9 @@ The player jumps automatically whenever it lands on a platform.
 - Moving platforms have a 20% chance to also collapse after landing
 - Extra normal platforms make the route more forgiving through 3,000 points
 - Guaranteed Path platforms become breakable at a 25% rate from 8,000 points
-- Spring items with a stronger jump
-- Timed Propeller Hat and Jetpack flight power-ups on safe normal platforms
+- Spring items with a stronger jump and a 45% early / 30% late spawn chance
+- Propeller Hats spawn from 8,000 points, decreasing from 15% to 5% by 12,000
+- Jetpacks spawn from 6,000 points at 10%, decreasing to 5% from 8,000 to 12,000
 - Power-up-aware spawn-ahead generation
 - Upward-only camera scrolling
 - Height-based score and locally saved best score

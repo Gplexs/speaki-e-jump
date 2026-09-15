@@ -202,48 +202,82 @@ test("item hierarchy, type identity, safe placement, and one-item ownership", ()
   assert.equal(breakable.item, null);
 });
 
-test("spawn roll ordering, NORMAL-only placement, opening exclusion, and rarity", () => {
+test("score-based item probabilities match every threshold and decay point", () => {
   const difficulty = new DifficultyManager();
-  const settings = difficulty.getSettings(0, GameConfig.safeOpeningLayers + 1);
-  assert(settings.springChance > GameConfig.propellerSpawnChance);
-  assert(GameConfig.propellerSpawnChance > GameConfig.jetpackSpawnChance);
+  const gameplayLayer = GameConfig.safeOpeningLayers + 1;
+  const assertChances = (score, spring, propeller, jetpack) => {
+    approximately(difficulty.getSettings(score, gameplayLayer).springChance, spring);
+    const flights = difficulty.getFlightPowerUpChances(score);
+    approximately(flights.propeller, propeller);
+    approximately(flights.jetpack, jetpack);
+  };
+
+  assertChances(0, 0.45, 0, 0);
+  assertChances(5999, 0.45, 0, 0);
+  assertChances(6000, 0.45, 0, 0.1);
+  assertChances(7999, 0.45, 0, 0.1);
+  assertChances(8000, 0.3, 0.15, 0.1);
+  assertChances(10000, 0.3, 0.1, 0.075);
+  assertChances(12000, 0.3, 0.05, 0.05);
+  assertChances(16000, 0.3, 0.05, 0.05);
+});
+
+test("flight spawn roll ordering, NORMAL-only placement, and opening exclusion", () => {
+  const difficulty = new DifficultyManager();
+  const peakScore = GameConfig.propellerMinScore;
+  const peakChances = difficulty.getFlightPowerUpChances(peakScore);
 
   const manager = new PlatformManager(difficulty, { seed: "spawn-order" });
   manager.reset(0, false);
 
   const opening = makePlatform();
-  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
-  assert.equal(manager.tryAddFlightPowerUp(opening, GameConfig.safeOpeningLayers), null);
+  manager.itemRandom = fixedRandom(peakChances.propeller * 0.5);
+  assert.equal(
+    manager.tryAddFlightPowerUp(opening, GameConfig.safeOpeningLayers, peakScore),
+    null
+  );
   assert.equal(opening.item, null);
 
   for (const type of [PlatformType.MOVING, PlatformType.BREAKABLE]) {
     const unsafe = makePlatform(100, 300, 120, type);
     assert.equal(
-      manager.tryAddFlightPowerUp(unsafe, GameConfig.safeOpeningLayers + 30),
+      manager.tryAddFlightPowerUp(
+        unsafe,
+        GameConfig.safeOpeningLayers + 30,
+        peakScore
+      ),
       null
     );
     assert.equal(unsafe.item, null);
   }
 
+  manager.lastFlightPowerUpLayer = -Infinity;
+  manager.itemRandom = fixedRandom(0);
+  assert.equal(manager.tryAddFlightPowerUp(makePlatform(), 30, 5999), null);
+  assert.equal(
+    manager.tryAddFlightPowerUp(makePlatform(), 30, 6000)?.type,
+    ItemType.JETPACK
+  );
+
   const propellerPlatform = makePlatform();
   manager.lastFlightPowerUpLayer = -Infinity;
-  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
-  const propeller = manager.tryAddFlightPowerUp(propellerPlatform, 30);
+  manager.itemRandom = fixedRandom(peakChances.propeller * 0.5);
+  const propeller = manager.tryAddFlightPowerUp(propellerPlatform, 30, peakScore);
   assert.equal(propeller?.type, ItemType.PROPELLER_HAT);
 
   const jetpackPlatform = makePlatform();
   manager.lastFlightPowerUpLayer = -Infinity;
   manager.itemRandom = fixedRandom(
-    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance * 0.5
+    peakChances.propeller + peakChances.jetpack * 0.5
   );
-  const jetpack = manager.tryAddFlightPowerUp(jetpackPlatform, 30);
+  const jetpack = manager.tryAddFlightPowerUp(jetpackPlatform, 30, peakScore);
   assert.equal(jetpack?.type, ItemType.JETPACK);
 
   const boundaryPlatform = makePlatform();
   manager.lastFlightPowerUpLayer = -Infinity;
-  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance);
+  manager.itemRandom = fixedRandom(peakChances.propeller);
   assert.equal(
-    manager.tryAddFlightPowerUp(boundaryPlatform, 30)?.type,
+    manager.tryAddFlightPowerUp(boundaryPlatform, 30, peakScore)?.type,
     ItemType.JETPACK,
     "the propeller interval must precede the jetpack interval"
   );
@@ -251,41 +285,53 @@ test("spawn roll ordering, NORMAL-only placement, opening exclusion, and rarity"
   const missPlatform = makePlatform();
   manager.lastFlightPowerUpLayer = -Infinity;
   manager.itemRandom = fixedRandom(
-    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance
+    peakChances.propeller + peakChances.jetpack
   );
-  assert.equal(manager.tryAddFlightPowerUp(missPlatform, 30), null);
+  assert.equal(manager.tryAddFlightPowerUp(missPlatform, 30, peakScore), null);
 });
 
 test("Propeller and Jetpack share the layer cooldown", () => {
-  const manager = new PlatformManager(new DifficultyManager(), { seed: "cooldown" });
+  const difficulty = new DifficultyManager();
+  const score = GameConfig.propellerMinScore;
+  const chances = difficulty.getFlightPowerUpChances(score);
+  const manager = new PlatformManager(difficulty, { seed: "cooldown" });
   manager.reset(0, false);
 
-  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  manager.itemRandom = fixedRandom(chances.propeller * 0.5);
   assert.equal(
-    manager.tryAddFlightPowerUp(makePlatform(), 30)?.type,
+    manager.tryAddFlightPowerUp(makePlatform(), 30, score)?.type,
     ItemType.PROPELLER_HAT
   );
   assert.equal(manager.lastFlightPowerUpLayer, 30);
 
   manager.itemRandom = fixedRandom(
-    GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance * 0.5
+    chances.propeller + chances.jetpack * 0.5
   );
   assert.equal(
-    manager.tryAddFlightPowerUp(makePlatform(), 30 + GameConfig.jetpackMinSpawnGap - 1),
+    manager.tryAddFlightPowerUp(
+      makePlatform(),
+      30 + GameConfig.jetpackMinSpawnGap - 1,
+      score
+    ),
     null,
     "a recent propeller must block a too-close jetpack"
   );
   assert.equal(
-    manager.tryAddFlightPowerUp(makePlatform(), 30 + GameConfig.jetpackMinSpawnGap)?.type,
+    manager.tryAddFlightPowerUp(
+      makePlatform(),
+      30 + GameConfig.jetpackMinSpawnGap,
+      score
+    )?.type,
     ItemType.JETPACK
   );
 
   const jetpackLayer = 30 + GameConfig.jetpackMinSpawnGap;
-  manager.itemRandom = fixedRandom(GameConfig.propellerSpawnChance * 0.5);
+  manager.itemRandom = fixedRandom(chances.propeller * 0.5);
   assert.equal(
     manager.tryAddFlightPowerUp(
       makePlatform(),
-      jetpackLayer + GameConfig.propellerMinSpawnGap - 1
+      jetpackLayer + GameConfig.propellerMinSpawnGap - 1,
+      score
     ),
     null,
     "a recent jetpack must block a too-close propeller"
@@ -293,7 +339,8 @@ test("Propeller and Jetpack share the layer cooldown", () => {
   assert.equal(
     manager.tryAddFlightPowerUp(
       makePlatform(),
-      jetpackLayer + GameConfig.propellerMinSpawnGap
+      jetpackLayer + GameConfig.propellerMinSpawnGap,
+      score
     )?.type,
     ItemType.PROPELLER_HAT
   );
@@ -333,6 +380,12 @@ test("seeded generation integrates power-ups without weakening the safe route", 
     const current = flights[index];
     assert.equal(current.platform.type, PlatformType.NORMAL);
     assert.equal(current.platform.isGuaranteed, true);
+    assert(
+      current.platform.generationScore >=
+        (current.item.type === ItemType.PROPELLER_HAT
+          ? GameConfig.propellerMinScore
+          : GameConfig.jetpackMinScore)
+    );
     assert(current.layerIndex > GameConfig.safeOpeningLayers);
     assert.equal(current.platform.item, current.item);
     assert.equal(current.item.collected, false);
@@ -365,7 +418,7 @@ test("seeded generation integrates power-ups without weakening the safe route", 
   assert.equal(validation.generationFailures, 0);
 });
 
-test("aggregate generation keeps Spring more common than Propeller and Jetpack", () => {
+test("aggregate generation keeps Spring more common than both flight power-ups", () => {
   const totals = {
     [ItemType.SPRING]: 0,
     [ItemType.PROPELLER_HAT]: 0,
@@ -389,10 +442,11 @@ test("aggregate generation keeps Spring more common than Propeller and Jetpack",
     }
   }
 
-  assert(totals[ItemType.JETPACK] > 0, "the rarest item must still be generated");
+  assert(totals[ItemType.PROPELLER_HAT] > 0, "Propeller Hat must be generated");
+  assert(totals[ItemType.JETPACK] > 0, "Jetpack must be generated");
   assert(
     totals[ItemType.SPRING] > totals[ItemType.PROPELLER_HAT] &&
-      totals[ItemType.PROPELLER_HAT] > totals[ItemType.JETPACK],
+      totals[ItemType.SPRING] > totals[ItemType.JETPACK],
     `unexpected item frequency order: ${JSON.stringify(totals)}`
   );
 });

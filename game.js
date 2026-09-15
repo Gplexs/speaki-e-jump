@@ -9,11 +9,19 @@
     // Jump height is proportional to launch velocity squared.
     jumpPower: 720 * Math.sqrt(1.5),
     springJumpMultiplier: 1.7,
-    propellerSpawnChance: 0.025,
+    springLateScoreThreshold: 8000,
+    springEarlySpawnChance: 0.45,
+    springLateSpawnChance: 0.3,
+    propellerMinScore: 8000,
+    propellerPeakSpawnChance: 0.15,
+    propellerMinimumSpawnChance: 0.05,
     propellerDuration: 3.5,
     propellerFlightSpeed: 280,
     propellerMinSpawnGap: 18,
-    jetpackSpawnChance: 0.01,
+    jetpackMinScore: 6000,
+    jetpackPeakSpawnChance: 0.1,
+    jetpackMinimumSpawnChance: 0.05,
+    flightChanceDecayEndScore: 12000,
     jetpackDuration: 3,
     jetpackFlightSpeed: 480,
     jetpackMinSpawnGap: 22,
@@ -680,6 +688,37 @@
   }
 
   class DifficultyManager {
+    getSpringChance(score) {
+      return score < GameConfig.springLateScoreThreshold
+        ? GameConfig.springEarlySpawnChance
+        : GameConfig.springLateSpawnChance;
+    }
+
+    getFlightPowerUpChances(score) {
+      const decayProgress = clamp(
+        (score - GameConfig.propellerMinScore) /
+          (GameConfig.flightChanceDecayEndScore - GameConfig.propellerMinScore),
+        0,
+        1
+      );
+      return {
+        propeller: score < GameConfig.propellerMinScore
+          ? 0
+          : lerp(
+            GameConfig.propellerPeakSpawnChance,
+            GameConfig.propellerMinimumSpawnChance,
+            decayProgress
+          ),
+        jetpack: score < GameConfig.jetpackMinScore
+          ? 0
+          : lerp(
+            GameConfig.jetpackPeakSpawnChance,
+            GameConfig.jetpackMinimumSpawnChance,
+            decayProgress
+          )
+      };
+    }
+
     getSettings(score, layerIndex) {
       const level = clamp(score / 12000, 0, 1);
       const maximumJumpHeight = PlatformPhysics.getMaximumJumpHeight();
@@ -707,7 +746,7 @@
         maxWidth: opening ? 116 : lerp(116, 96, level),
         movingChance: lerp(0.06, 0.23, level),
         breakableChance: lerp(0.04, 0.18, level),
-        springChance: lerp(0.05, 0.1, level),
+        springChance: this.getSpringChance(score),
         oneFillerChance: earlyAssistance
           ? GameConfig.earlyOneFillerChance
           : lerp(0.22, 0.18, level),
@@ -872,7 +911,7 @@
         nextLayerIndex
       );
       this.platforms.push(...fillers);
-      this.tryAddFlightPowerUp(guaranteed, nextLayerIndex);
+      this.tryAddFlightPowerUp(guaranteed, nextLayerIndex, score);
 
       this.layerIndex = nextLayerIndex;
       this.lastGuaranteedPlatform = guaranteed;
@@ -946,7 +985,7 @@
       return true;
     }
 
-    tryAddFlightPowerUp(platform, layerIndex) {
+    tryAddFlightPowerUp(platform, layerIndex, score) {
       if (
         layerIndex <= GameConfig.safeOpeningLayers ||
         platform.type !== PlatformType.NORMAL ||
@@ -956,16 +995,17 @@
       }
 
       const layerGap = layerIndex - this.lastFlightPowerUpLayer;
+      const chances = this.difficultyManager.getFlightPowerUpChances(score);
       const roll = this.itemRandom.next();
       let type = null;
       if (
         layerGap >= GameConfig.propellerMinSpawnGap &&
-        roll < GameConfig.propellerSpawnChance
+        roll < chances.propeller
       ) {
         type = ItemType.PROPELLER_HAT;
       } else if (
         layerGap >= GameConfig.jetpackMinSpawnGap &&
-        roll < GameConfig.propellerSpawnChance + GameConfig.jetpackSpawnChance
+        roll < chances.propeller + chances.jetpack
       ) {
         type = ItemType.JETPACK;
       }
