@@ -24,8 +24,8 @@ body {
 
 .game-shell {
   display: grid;
-  width: min(100vw, calc(100vh * 2 / 3));
-  height: min(100vh, calc(100vw * 3 / 2));
+  width: min(100vw, calc(100vh * 9 / 16));
+  height: min(100vh, calc(100vw * 16 / 9));
   place-items: center;
 }
 

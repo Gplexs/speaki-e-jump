@@ -55,6 +55,7 @@ function loadBrowserHarness(seed = "monster-tests") {
     moveTo: noop,
     restore: noop,
     save: noop,
+    setTransform: noop,
     stroke: noop,
     strokeRect: noop
   };
@@ -62,8 +63,8 @@ function loadBrowserHarness(seed = "monster-tests") {
     addEventListener: noop,
     focus: noop,
     getContext: () => context2d,
-    height: 720,
-    width: 480
+    height: 1280,
+    width: 720
   };
   const sandbox = {
     URLSearchParams,

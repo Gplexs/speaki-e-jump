@@ -55,14 +55,15 @@ function makeBrowserHarness(seed, forbidMathRandom = true) {
     moveTo: noop,
     restore: noop,
     save: noop,
+    setTransform: noop,
     stroke: noop
   };
   const canvas = {
     addEventListener: noop,
     focus: noop,
     getContext: () => context2d,
-    height: 720,
-    width: 480
+    height: 1280,
+    width: 720
   };
 
   const sandbox = {
@@ -620,6 +621,14 @@ function validateGeneratedPlatforms(run) {
 
 function validateAnimationLoop() {
   const harness = makeBrowserHarness("animation-loop-seed");
+  const { GameConfig } = harness.internals;
+  assert.equal(harness.canvas.width, 720, "canvas width must use the 9:16 viewport");
+  assert.equal(harness.canvas.height, 1280, "canvas height must use the 9:16 viewport");
+  assert.equal(GameConfig.canvasWidth, 720);
+  assert.equal(GameConfig.canvasHeight, 1280);
+  assert.equal(GameConfig.renderScale, 1.5);
+  assert.equal(GameConfig.width * GameConfig.renderScale, GameConfig.canvasWidth);
+  assert.equal(GameConfig.height * GameConfig.renderScale, GameConfig.canvasHeight);
   assert.equal(harness.raf.pending, 1, "game must schedule one initial animation frame");
   assert.equal(harness.raf.requests, 1);
 
@@ -635,7 +644,12 @@ function validateAnimationLoop() {
     assert.equal(harness.raf.pending, 1, `frame ${frame} did not leave one pending loop`);
   }
   assert.equal(harness.raf.requests, frameCount + 1);
-  return { frameCount, pendingCallbacks: harness.raf.pending };
+  return {
+    canvas: `${GameConfig.canvasWidth}x${GameConfig.canvasHeight}`,
+    frameCount,
+    pendingCallbacks: harness.raf.pending,
+    renderScale: GameConfig.renderScale
+  };
 }
 
 function validateForcedFallback() {

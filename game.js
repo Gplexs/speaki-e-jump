@@ -1,9 +1,20 @@
 (function () {
   "use strict";
 
+  const CanvasConfig = Object.freeze({
+    width: 720,
+    height: 1280,
+    renderScale: 1.5
+  });
+
   const GameConfig = Object.freeze({
-    width: 480,
-    height: 720,
+    canvasWidth: CanvasConfig.width,
+    canvasHeight: CanvasConfig.height,
+    renderScale: CanvasConfig.renderScale,
+    // Physics run in design-space units so the existing feel and score curve
+    // remain stable. The renderer maps this 480-wide world to the 720px canvas.
+    width: CanvasConfig.width / CanvasConfig.renderScale,
+    height: CanvasConfig.height / CanvasConfig.renderScale,
     gravity: 1850,
     jumpHeightMultiplier: 1.5,
     // Jump height is proportional to launch velocity squared.
@@ -66,7 +77,7 @@
     playerHeight: 42,
     platformHeight: 14,
     startPlatformWidth: 132,
-    startPlatformY: 650,
+    startPlatformY: CanvasConfig.height / CanvasConfig.renderScale - 70,
     safeOpeningLayers: 7,
     openingMinVerticalGap: 74,
     openingMaxVerticalGap: 94,
@@ -2583,20 +2594,42 @@
     }
 
     drawMenu() {
+      const centerY = GameConfig.height * 0.5;
       this.drawOverlay();
-      this.drawCenteredText("Speaki-e Jump", 236, "bold 42px Arial, sans-serif");
-      this.drawCenteredText("A / D or Arrow Keys to Move", 304, "20px Arial, sans-serif");
-      this.drawButton("PLAY", 360);
-      this.drawCenteredText("Enter / Space / Click", 432, "17px Arial, sans-serif");
+      this.drawCenteredText(
+        "Speaki-e Jump",
+        centerY - 124,
+        "bold 42px Arial, sans-serif"
+      );
+      this.drawCenteredText(
+        "A / D or Arrow Keys to Move",
+        centerY - 56,
+        "20px Arial, sans-serif"
+      );
+      this.drawButton("PLAY", centerY);
+      this.drawCenteredText(
+        "Enter / Space / Click",
+        centerY + 72,
+        "17px Arial, sans-serif"
+      );
     }
 
     drawGameOver(score, best) {
+      const centerY = GameConfig.height * 0.5;
       this.drawOverlay();
-      this.drawCenteredText("GAME OVER", 230, "bold 42px Arial, sans-serif");
-      this.drawCenteredText(`Score: ${score}`, 294, "24px Arial, sans-serif");
-      this.drawCenteredText(`Best: ${best}`, 328, "24px Arial, sans-serif");
-      this.drawButton("PLAY AGAIN", 382);
-      this.drawCenteredText("R / Enter / Space / Click", 454, "17px Arial, sans-serif");
+      this.drawCenteredText(
+        "GAME OVER",
+        centerY - 130,
+        "bold 42px Arial, sans-serif"
+      );
+      this.drawCenteredText(`Score: ${score}`, centerY - 66, "24px Arial, sans-serif");
+      this.drawCenteredText(`Best: ${best}`, centerY - 32, "24px Arial, sans-serif");
+      this.drawButton("PLAY AGAIN", centerY + 22);
+      this.drawCenteredText(
+        "R / Enter / Space / Click",
+        centerY + 94,
+        "17px Arial, sans-serif"
+      );
     }
 
     drawOverlay() {
@@ -2626,8 +2659,20 @@
   class Game {
     constructor(canvas) {
       this.canvas = canvas;
+      this.canvas.width = GameConfig.canvasWidth;
+      this.canvas.height = GameConfig.canvasHeight;
       this.context = canvas.getContext("2d");
       this.context.imageSmoothingEnabled = false;
+      if (typeof this.context.setTransform === "function") {
+        this.context.setTransform(
+          GameConfig.renderScale,
+          0,
+          0,
+          GameConfig.renderScale,
+          0,
+          0
+        );
+      }
       this.renderer = new GameRenderer(this.context);
       this.difficultyManager = new DifficultyManager();
       this.platformManager = new PlatformManager(this.difficultyManager);
