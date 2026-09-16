@@ -212,14 +212,15 @@ test("score-based item probabilities match every threshold and decay point", () 
     approximately(flights.jetpack, jetpack);
   };
 
-  assertChances(0, 0.45, 0, 0);
-  assertChances(5999, 0.45, 0, 0);
-  assertChances(6000, 0.45, 0, 0.1);
-  assertChances(7999, 0.45, 0, 0.1);
-  assertChances(8000, 0.3, 0.15, 0.1);
-  assertChances(10000, 0.3, 0.1, 0.075);
-  assertChances(12000, 0.3, 0.05, 0.05);
-  assertChances(16000, 0.3, 0.05, 0.05);
+  assertChances(0, 0.4, 0, 0);
+  assertChances(5999, 0.4, 0, 0);
+  assertChances(6000, 0.4, 0.15, 0.15);
+  assertChances(7000, 0.4, 0.15, 0.15 - 0.1 / 6);
+  assertChances(7999, 0.4, 0.15, 0.15 - 0.1 * 1999 / 6000);
+  assertChances(8000, 0.4, 0.15, 0.15 - 0.1 / 3);
+  assertChances(10000, 0.4, 0.1, 0.15 - 0.1 * 2 / 3);
+  assertChances(12000, 0.4, 0.05, 0.05);
+  assertChances(16000, 0.4, 0.05, 0.05);
 });
 
 test("flight spawn roll ordering, NORMAL-only placement, and opening exclusion", () => {
@@ -256,7 +257,7 @@ test("flight spawn roll ordering, NORMAL-only placement, and opening exclusion",
   assert.equal(manager.tryAddFlightPowerUp(makePlatform(), 30, 5999), null);
   assert.equal(
     manager.tryAddFlightPowerUp(makePlatform(), 30, 6000)?.type,
-    ItemType.JETPACK
+    ItemType.PROPELLER_HAT
   );
 
   const propellerPlatform = makePlatform();

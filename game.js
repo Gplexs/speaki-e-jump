@@ -9,17 +9,16 @@
     // Jump height is proportional to launch velocity squared.
     jumpPower: 720 * Math.sqrt(1.5),
     springJumpMultiplier: 1.7,
-    springLateScoreThreshold: 8000,
-    springEarlySpawnChance: 0.45,
-    springLateSpawnChance: 0.3,
-    propellerMinScore: 8000,
+    springSpawnChance: 0.4,
+    propellerMinScore: 6000,
+    propellerChanceDecayStartScore: 8000,
     propellerPeakSpawnChance: 0.15,
     propellerMinimumSpawnChance: 0.05,
     propellerDuration: 3.5,
     propellerFlightSpeed: 280,
     propellerMinSpawnGap: 18,
     jetpackMinScore: 6000,
-    jetpackPeakSpawnChance: 0.1,
+    jetpackPeakSpawnChance: 0.15,
     jetpackMinimumSpawnChance: 0.05,
     flightChanceDecayEndScore: 12000,
     jetpackDuration: 3,
@@ -768,16 +767,21 @@
   }
 
   class DifficultyManager {
-    getSpringChance(score) {
-      return score < GameConfig.springLateScoreThreshold
-        ? GameConfig.springEarlySpawnChance
-        : GameConfig.springLateSpawnChance;
+    getSpringChance() {
+      return GameConfig.springSpawnChance;
     }
 
     getFlightPowerUpChances(score) {
-      const decayProgress = clamp(
-        (score - GameConfig.propellerMinScore) /
-          (GameConfig.flightChanceDecayEndScore - GameConfig.propellerMinScore),
+      const propellerDecayProgress = clamp(
+        (score - GameConfig.propellerChanceDecayStartScore) /
+          (GameConfig.flightChanceDecayEndScore -
+            GameConfig.propellerChanceDecayStartScore),
+        0,
+        1
+      );
+      const jetpackDecayProgress = clamp(
+        (score - GameConfig.jetpackMinScore) /
+          (GameConfig.flightChanceDecayEndScore - GameConfig.jetpackMinScore),
         0,
         1
       );
@@ -787,14 +791,14 @@
           : lerp(
             GameConfig.propellerPeakSpawnChance,
             GameConfig.propellerMinimumSpawnChance,
-            decayProgress
+            propellerDecayProgress
           ),
         jetpack: score < GameConfig.jetpackMinScore
           ? 0
           : lerp(
             GameConfig.jetpackPeakSpawnChance,
             GameConfig.jetpackMinimumSpawnChance,
-            decayProgress
+            jetpackDecayProgress
           )
       };
     }
@@ -845,7 +849,7 @@
         maxWidth: opening ? 116 : lerp(116, 96, level),
         movingChance: lerp(0.06, 0.23, level),
         breakableChance: lerp(0.04, 0.18, level),
-        springChance: this.getSpringChance(score),
+        springChance: this.getSpringChance(),
         oneFillerChance: earlyAssistance
           ? GameConfig.earlyOneFillerChance
           : lerp(0.22, 0.18, level),

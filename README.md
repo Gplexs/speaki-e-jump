@@ -25,9 +25,9 @@ The player jumps automatically whenever it lands on a platform.
 - Moving platforms have a 20% chance to also collapse after landing
 - Extra normal platforms make the route more forgiving through 3,000 points
 - Guaranteed Path platforms become breakable at a 25% rate from 8,000 points
-- Spring items with a stronger jump and a 45% early / 30% late spawn chance
-- Propeller Hats spawn from 8,000 points, decreasing from 15% to 5% by 12,000
-- Jetpacks spawn from 6,000 points at 10%, decreasing to 5% from 8,000 to 12,000
+- Spring items with a stronger jump and a score-independent 40% spawn chance
+- Propeller Hats spawn from 6,000 points at 15%, decreasing to 5% from 8,000 to 12,000
+- Jetpacks spawn from 6,000 points, decreasing from 15% to 5% by 12,000
 - BASIC_HOVER_MONSTER enemies that patrol horizontally from 4,000 points
 - Swept stomp collision, lethal body collision, and flight power-up enemy removal
 - Route-aware monster placement that preserves at least one realistic response
