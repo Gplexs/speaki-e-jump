@@ -15,6 +15,7 @@ The player jumps automatically whenever it lands on a platform.
 
 - Accelerated horizontal movement with friction and air control
 - Normal jump height increased by 50% from the initial prototype
+- 30% of jumps perform one complete airborne character spin
 - Horizontal screen wrapping
 - One-way platform collision using the previous frame position
 - Layer-based endless generation with a physics-validated safe path

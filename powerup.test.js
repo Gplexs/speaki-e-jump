@@ -57,11 +57,13 @@ function loadBrowserHarness(seed = "powerup-tests") {
     fillText: noop,
     lineTo: noop,
     moveTo: noop,
+    rotate: noop,
     restore: noop,
     save: noop,
     setTransform: noop,
     stroke: noop,
-    strokeRect: noop
+    strokeRect: noop,
+    translate: noop
   };
   const canvas = {
     addEventListener: noop,
@@ -595,6 +597,41 @@ test("timed flight has exact rise, ignores gravity, and returns naturally to gra
       assert.equal(player.vy, 0);
     }
   }
+});
+
+test("30% jump spin completes one turn and never carries into flight", () => {
+  const decisions = [true, false, true];
+  const observedChances = [];
+  const spinRandom = {
+    chance(probability) {
+      observedChances.push(probability);
+      return decisions.shift();
+    }
+  };
+  const player = new Player(100, 400, spinRandom);
+
+  assert.equal(GameConfig.jumpSpinChance, 0.3);
+  assert.equal(player.launch(), true);
+  assert.equal(player.jumpSpinActive, true);
+  approximately(player.rotation, 0);
+
+  player.update(GameConfig.jumpSpinDuration * 0.5, 0);
+  assert.equal(player.jumpSpinActive, true);
+  approximately(player.rotation, Math.PI, 1e-9, "halfway spin angle");
+
+  player.update(GameConfig.jumpSpinDuration * 0.5, 0);
+  assert.equal(player.jumpSpinActive, false);
+  approximately(player.rotation, 0, 1e-9, "completed spin returns upright");
+
+  player.launch();
+  assert.equal(player.jumpSpinActive, false, "failed 30% roll must stay upright");
+
+  player.launch();
+  assert.equal(player.jumpSpinActive, true);
+  player.activatePowerUp(ItemType.PROPELLER_HAT);
+  assert.equal(player.jumpSpinActive, false, "flight must cancel a jump spin");
+  approximately(player.rotation, 0);
+  assert.deepEqual(observedChances, [0.3, 0.3, 0.3]);
 });
 
 test("horizontal control and full-width wrap remain active during flight", () => {

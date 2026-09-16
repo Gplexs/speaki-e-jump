@@ -53,11 +53,13 @@ function loadBrowserHarness(seed = "monster-tests") {
     fillText: noop,
     lineTo: noop,
     moveTo: noop,
+    rotate: noop,
     restore: noop,
     save: noop,
     setTransform: noop,
     stroke: noop,
-    strokeRect: noop
+    strokeRect: noop,
+    translate: noop
   };
   const canvas = {
     addEventListener: noop,

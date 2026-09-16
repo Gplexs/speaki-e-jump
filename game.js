@@ -19,6 +19,8 @@
     jumpHeightMultiplier: 1.5,
     // Jump height is proportional to launch velocity squared.
     jumpPower: 720 * Math.sqrt(1.5),
+    jumpSpinChance: 0.3,
+    jumpSpinDuration: 0.72,
     springJumpMultiplier: 1.7,
     springSpawnChance: 0.4,
     propellerMinScore: 6000,
@@ -460,9 +462,10 @@
   }
 
   class Player {
-    constructor(x, y) {
+    constructor(x, y, spinRandom = null) {
       this.width = GameConfig.playerWidth;
       this.height = GameConfig.playerHeight;
+      this.spinRandom = spinRandom;
       this.reset(x, y);
     }
 
@@ -477,13 +480,41 @@
       this.powerUpTimer = 0;
       this.powerUpFlightSpeed = 0;
       this.powerUpEndedThisFrame = false;
+      this.cancelJumpSpin();
     }
 
     launch(multiplier = 1) {
       if (this.isFlying) {
-        return;
+        return false;
       }
       this.vy = -GameConfig.jumpPower * multiplier;
+      this.jumpSpinActive = Boolean(
+        this.spinRandom && this.spinRandom.chance(GameConfig.jumpSpinChance)
+      );
+      this.jumpSpinElapsed = 0;
+      this.rotation = 0;
+      return true;
+    }
+
+    cancelJumpSpin() {
+      this.jumpSpinActive = false;
+      this.jumpSpinElapsed = 0;
+      this.rotation = 0;
+    }
+
+    updateJumpSpin(deltaTime) {
+      if (!this.jumpSpinActive) {
+        return;
+      }
+      this.jumpSpinElapsed = Math.min(
+        GameConfig.jumpSpinDuration,
+        this.jumpSpinElapsed + deltaTime
+      );
+      const progress = this.jumpSpinElapsed / GameConfig.jumpSpinDuration;
+      this.rotation = progress * Math.PI * 2;
+      if (progress >= 1) {
+        this.cancelJumpSpin();
+      }
     }
 
     get isFlying() {
@@ -516,6 +547,7 @@
       this.powerUpTimer = settings.duration;
       this.powerUpFlightSpeed = settings.speed;
       this.powerUpEndedThisFrame = false;
+      this.cancelJumpSpin();
       this.vy = -settings.speed;
       return true;
     }
@@ -535,6 +567,7 @@
       this.previousX = this.x;
       this.previousY = this.y;
       this.powerUpEndedThisFrame = false;
+      this.updateJumpSpin(deltaTime);
 
       if (direction !== 0) {
         this.vx += direction * GameConfig.moveAcceleration * deltaTime;
@@ -2443,8 +2476,30 @@
 
     drawPlayer(player) {
       const context = this.context;
-      context.fillStyle = this.colors.player;
-      this.drawWrappedRectangle(player.x, player.y, player.width, player.height);
+      const drawPositions = [player.x];
+      if (player.x < 0) {
+        drawPositions.push(player.x + GameConfig.width);
+      } else if (player.x + player.width > GameConfig.width) {
+        drawPositions.push(player.x - GameConfig.width);
+      }
+
+      for (const drawX of drawPositions) {
+        context.save();
+        context.translate(
+          drawX + player.width * 0.5,
+          player.y + player.height * 0.5
+        );
+        context.rotate(player.rotation);
+        context.fillStyle = this.colors.player;
+        context.fillRect(
+          -player.width * 0.5,
+          -player.height * 0.5,
+          player.width,
+          player.height
+        );
+        context.restore();
+      }
+
       if (player.isFlying) {
         const isPropeller = player.activePowerUp === ItemType.PROPELLER_HAT;
         context.fillStyle = isPropeller ? this.colors.propeller : this.colors.jetpack;
@@ -2572,16 +2627,6 @@
       context.fillText("J", jetpack.x + jetpack.width * 0.5, jetpack.y + jetpack.height * 0.38);
     }
 
-    drawWrappedRectangle(x, y, width, height) {
-      const context = this.context;
-      context.fillRect(x, y, width, height);
-      if (x < 0) {
-        context.fillRect(x + GameConfig.width, y, width, height);
-      } else if (x + width > GameConfig.width) {
-        context.fillRect(x - GameConfig.width, y, width, height);
-      }
-    }
-
     drawHud(score, best) {
       const context = this.context;
       context.fillStyle = this.colors.text;
@@ -2680,6 +2725,11 @@
         this.difficultyManager,
         this.platformManager
       );
+      const spinSeed = this.platformManager.seed === null ||
+        this.platformManager.seed === undefined
+        ? null
+        : `${this.platformManager.seed}:player-spin`;
+      this.playerSpinRandom = new RandomSource(spinSeed);
       this.input = new InputManager(canvas, (action) => this.handleAction(action));
       this.state = GameState.MENU;
       this.bestScore = this.loadBestScore();
@@ -2701,6 +2751,7 @@
       this.maxHeight = 0;
       this.cameraOffset = 0;
       this.playTime = 0;
+      this.playerSpinRandom.reset();
       this.monsterManager.reset();
       const startPlatform = this.platformManager.reset(0);
       const playerX = startPlatform.x + (startPlatform.width - GameConfig.playerWidth) * 0.5;
@@ -2708,7 +2759,7 @@
       if (this.player) {
         this.player.reset(playerX, playerY);
       } else {
-        this.player = new Player(playerX, playerY);
+        this.player = new Player(playerX, playerY, this.playerSpinRandom);
       }
       this.startPlayerY = playerY;
     }
@@ -2972,6 +3023,7 @@
       this.state = GameState.GAME_OVER;
       this.input.clear();
       this.player.clearPowerUp();
+      this.player.cancelJumpSpin();
       if (this.score > this.bestScore) {
         this.bestScore = this.score;
         this.saveBestScore(this.bestScore);
@@ -3073,7 +3125,9 @@
           activePowerUp: this.player.activePowerUp,
           powerUpTimer: round(this.player.powerUpTimer),
           isFlying: this.player.isFlying,
-          remainingFlightDistance: round(this.player.remainingFlightDistance)
+          remainingFlightDistance: round(this.player.remainingFlightDistance),
+          jumpSpinActive: this.player.jumpSpinActive,
+          rotation: round(this.player.rotation)
         },
         platforms: this.platformManager.platforms.map((platform) => ({
           x: Math.round(platform.x * 100) / 100,

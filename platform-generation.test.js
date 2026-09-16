@@ -53,10 +53,12 @@ function makeBrowserHarness(seed, forbidMathRandom = true) {
     fillText: noop,
     lineTo: noop,
     moveTo: noop,
+    rotate: noop,
     restore: noop,
     save: noop,
     setTransform: noop,
-    stroke: noop
+    stroke: noop,
+    translate: noop
   };
   const canvas = {
     addEventListener: noop,
