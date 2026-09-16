@@ -31,6 +31,24 @@
     earlyFillerScoreThreshold: 3000,
     earlyOneFillerChance: 0.6,
     earlyTwoFillerChance: 0.25,
+    monsterMinSpawnScore: 4000,
+    monsterInitialSpawnChance: 0.06,
+    monsterMaximumSpawnChance: 0.14,
+    monsterDifficultyCapScore: 12000,
+    maxVisibleMonsters: 3,
+    maxMonsterSpawnAttempts: 24,
+    monsterWidth: 36,
+    monsterHeight: 28,
+    monsterMoveSpeed: 64,
+    monsterMoveRange: 44,
+    monsterHoverMinOffset: 48,
+    monsterHoverMaxOffset: 82,
+    monsterMinimumSpawnLead: 120,
+    monsterSeparationPadding: 16,
+    monsterRouteBlockVerticalRange: 100,
+    monsterLandingEscapeWidth: 28,
+    monsterAvoidancePadding: 6,
+    monsterStompBounceMultiplier: 0.9,
     moveAcceleration: 2200,
     horizontalFriction: 8,
     maxMoveSpeed: 330,
@@ -78,6 +96,10 @@
     SPRING: "SPRING",
     PROPELLER_HAT: "PROPELLER_HAT",
     JETPACK: "JETPACK"
+  });
+
+  const MonsterType = Object.freeze({
+    BASIC_HOVER_MONSTER: "BASIC_HOVER_MONSTER"
   });
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -687,6 +709,64 @@
     }
   }
 
+  class Monster {
+    constructor(
+      x,
+      y,
+      type = MonsterType.BASIC_HOVER_MONSTER,
+      moveRange = GameConfig.monsterMoveRange,
+      moveSpeed = GameConfig.monsterMoveSpeed,
+      moveDirection = 1
+    ) {
+      this.x = x;
+      this.y = y;
+      this.previousX = x;
+      this.width = GameConfig.monsterWidth;
+      this.height = GameConfig.monsterHeight;
+      this.type = type;
+      this.originX = x;
+      this.moveRange = moveRange;
+      this.moveMin = x - moveRange;
+      this.moveMax = x + moveRange;
+      this.vx = Math.abs(moveSpeed) * (moveDirection < 0 ? -1 : 1);
+      this.alive = true;
+      this.spawnLayer = -1;
+      this.spawnScore = 0;
+      this.anchorIsGuaranteed = false;
+    }
+
+    update(deltaTime) {
+      if (!this.alive) {
+        return;
+      }
+
+      this.previousX = this.x;
+      let nextX = this.x + this.vx * deltaTime;
+      while (nextX < this.moveMin || nextX > this.moveMax) {
+        if (nextX > this.moveMax) {
+          nextX = this.moveMax - (nextX - this.moveMax);
+          this.vx = -Math.abs(this.vx);
+        } else if (nextX < this.moveMin) {
+          nextX = this.moveMin + (this.moveMin - nextX);
+          this.vx = Math.abs(this.vx);
+        }
+      }
+      this.x = nextX;
+    }
+
+    scroll(distance) {
+      this.y += distance;
+    }
+
+    kill() {
+      if (!this.alive) {
+        return false;
+      }
+      this.alive = false;
+      return true;
+    }
+  }
+
   class DifficultyManager {
     getSpringChance(score) {
       return score < GameConfig.springLateScoreThreshold
@@ -716,6 +796,25 @@
             GameConfig.jetpackMinimumSpawnChance,
             decayProgress
           )
+      };
+    }
+
+    getMonsterSettings(score) {
+      if (score < GameConfig.monsterMinSpawnScore) {
+        return { spawnChance: 0 };
+      }
+      const progress = clamp(
+        (score - GameConfig.monsterMinSpawnScore) /
+          (GameConfig.monsterDifficultyCapScore - GameConfig.monsterMinSpawnScore),
+        0,
+        1
+      );
+      return {
+        spawnChance: lerp(
+          GameConfig.monsterInitialSpawnChance,
+          GameConfig.monsterMaximumSpawnChance,
+          progress
+        )
       };
     }
 
@@ -875,15 +974,17 @@
         -GameConfig.height * GameConfig.spawnAheadScreens -
         Math.max(0, additionalAheadDistance);
       let generatedThisUpdate = 0;
+      const generatedLayers = [];
 
       while (this.highestGeneratedY > spawnTargetY && generatedThisUpdate < 64) {
-        this.generateNextLayer(score);
+        generatedLayers.push(this.generateNextLayer(score));
         generatedThisUpdate += 1;
       }
 
       if (this.highestGeneratedY > spawnTargetY) {
         throw new Error("Platform generation did not advance above the spawn target.");
       }
+      return generatedLayers;
     }
 
     generateInitialPlatforms(score = 0) {
@@ -1707,6 +1808,432 @@
     }
   }
 
+  class MonsterManager {
+    constructor(difficultyManager, platformManager, options = {}) {
+      this.difficultyManager = difficultyManager;
+      this.platformManager = platformManager;
+      const hasSeedOverride = Object.prototype.hasOwnProperty.call(options, "seed");
+      const baseSeed = hasSeedOverride ? options.seed : platformManager.seed;
+      this.seed = baseSeed === null || baseSeed === undefined
+        ? null
+        : `${baseSeed}:monsters`;
+      this.random = new RandomSource(this.seed);
+      this.monsters = [];
+      this.stats = this.createEmptyStats();
+    }
+
+    createEmptyStats() {
+      return {
+        spawnRolls: 0,
+        spawned: 0,
+        skippedChance: 0,
+        skippedCapacity: 0,
+        skippedUnsafe: 0,
+        blockedRoutesPrevented: 0,
+        cleanedUp: 0,
+        removedByStomp: 0,
+        removedByPowerUp: 0,
+        rejectedCandidates: {
+          outside: 0,
+          reaction: 0,
+          platformOverlap: 0,
+          itemOverlap: 0,
+          monsterOverlap: 0,
+          noReachableRoute: 0,
+          blocksAllRoutes: 0
+        }
+      };
+    }
+
+    reset() {
+      this.monsters.length = 0;
+      this.random.reset(this.seed);
+      this.stats = this.createEmptyStats();
+    }
+
+    update(deltaTime) {
+      for (const monster of this.monsters) {
+        monster.update(deltaTime);
+      }
+      this.cleanupMonsters();
+    }
+
+    scroll(distance) {
+      for (const monster of this.monsters) {
+        monster.scroll(distance);
+      }
+    }
+
+    cleanupMonsters() {
+      const cleanupY = GameConfig.height + GameConfig.cleanupMargin;
+      this.monsters = this.monsters.filter((monster) => {
+        if (!monster.alive) {
+          return false;
+        }
+        if (monster.y > cleanupY) {
+          monster.kill();
+          this.stats.cleanedUp += 1;
+          return false;
+        }
+        return true;
+      });
+    }
+
+    removeMonster(monster, reason) {
+      if (!monster || !monster.kill()) {
+        return false;
+      }
+      if (reason === "STOMP") {
+        this.stats.removedByStomp += 1;
+      } else if (reason === "POWER_UP") {
+        this.stats.removedByPowerUp += 1;
+      }
+      return true;
+    }
+
+    spawnForLayers(layers) {
+      const spawned = [];
+      if (!Array.isArray(layers)) {
+        return spawned;
+      }
+      for (const layer of layers) {
+        const monster = this.trySpawnForLayer(layer);
+        if (monster) {
+          spawned.push(monster);
+        }
+      }
+      return spawned;
+    }
+
+    trySpawnForLayer(layer) {
+      const score = layer.guaranteed.generationScore;
+      const settings = this.difficultyManager.getMonsterSettings(score);
+      if (settings.spawnChance <= 0) {
+        return null;
+      }
+      if (this.monsters.filter((monster) => monster.alive).length >=
+        GameConfig.maxVisibleMonsters) {
+        this.stats.skippedCapacity += 1;
+        return null;
+      }
+
+      this.stats.spawnRolls += 1;
+      if (!this.random.chance(settings.spawnChance)) {
+        this.stats.skippedChance += 1;
+        return null;
+      }
+
+      const layerIndex = layer.guaranteed.layerIndex;
+      const routeSources = this.getRouteSources(layerIndex);
+      const reachablePlatforms = this.getReachablePlatforms(layerIndex, routeSources);
+      if (reachablePlatforms.length === 0) {
+        this.rejectCandidate("noReachableRoute");
+        this.stats.skippedUnsafe += 1;
+        return null;
+      }
+
+      for (let attempt = 0; attempt < GameConfig.maxMonsterSpawnAttempts; attempt += 1) {
+        const anchor = reachablePlatforms[this.random.integer(
+          0,
+          reachablePlatforms.length - 1
+        )];
+        const candidate = this.createCandidate(anchor, score, layerIndex);
+        if (!this.canSpawnMonster(
+          candidate,
+          layerIndex,
+          reachablePlatforms,
+          routeSources
+        )) {
+          continue;
+        }
+
+        this.monsters.push(candidate);
+        this.stats.spawned += 1;
+        return candidate;
+      }
+
+      this.stats.skippedUnsafe += 1;
+      return null;
+    }
+
+    createCandidate(anchor, score, layerIndex) {
+      const moveRange = GameConfig.monsterMoveRange;
+      const minimumOrigin = GameConfig.sidePadding + moveRange;
+      const maximumOrigin =
+        GameConfig.width - GameConfig.sidePadding - GameConfig.monsterWidth - moveRange;
+      const platformRange = this.getPlatformMovementRange(anchor);
+      const desiredCenter = this.random.range(platformRange.left, platformRange.right);
+      const originX = clamp(
+        desiredCenter - GameConfig.monsterWidth * 0.5,
+        minimumOrigin,
+        maximumOrigin
+      );
+      const monster = new Monster(
+        originX,
+        anchor.y - this.random.range(
+          GameConfig.monsterHoverMinOffset,
+          GameConfig.monsterHoverMaxOffset
+        ),
+        MonsterType.BASIC_HOVER_MONSTER,
+        moveRange,
+        GameConfig.monsterMoveSpeed,
+        this.random.chance(0.5) ? -1 : 1
+      );
+      monster.spawnLayer = layerIndex;
+      monster.spawnScore = score;
+      monster.anchorIsGuaranteed = anchor.isGuaranteed;
+      return monster;
+    }
+
+    canSpawnMonster(
+      candidate,
+      layerIndex = candidate.spawnLayer,
+      reachablePlatforms = this.getReachablePlatforms(layerIndex),
+      routeSources = this.getRouteSources(layerIndex)
+    ) {
+      const movementRange = this.getMonsterMovementRange(candidate);
+      if (
+        movementRange.left < GameConfig.sidePadding - 1e-6 ||
+        movementRange.right > GameConfig.width - GameConfig.sidePadding + 1e-6
+      ) {
+        return this.rejectCandidate("outside");
+      }
+      if (candidate.y + candidate.height > -GameConfig.monsterMinimumSpawnLead) {
+        return this.rejectCandidate("reaction");
+      }
+      if (this.overlapsPlatform(candidate)) {
+        return this.rejectCandidate("platformOverlap");
+      }
+      if (this.overlapsItem(candidate)) {
+        return this.rejectCandidate("itemOverlap");
+      }
+      if (this.overlapsOtherMonster(candidate)) {
+        return this.rejectCandidate("monsterOverlap");
+      }
+      if (reachablePlatforms.length === 0 || routeSources.length === 0) {
+        return this.rejectCandidate("noReachableRoute");
+      }
+      if (this.wouldBlockAllReachableRoutes(
+        candidate,
+        layerIndex,
+        reachablePlatforms,
+        routeSources
+      )) {
+        this.stats.blockedRoutesPrevented += 1;
+        return this.rejectCandidate("blocksAllRoutes");
+      }
+      return true;
+    }
+
+    rejectCandidate(reason) {
+      if (Object.prototype.hasOwnProperty.call(this.stats.rejectedCandidates, reason)) {
+        this.stats.rejectedCandidates[reason] += 1;
+      }
+      return false;
+    }
+
+    getRouteSources(layerIndex) {
+      return this.platformManager.platforms.filter((platform) =>
+        platform.layerIndex === layerIndex - 1 &&
+        !platform.removed &&
+        !platform.breaking
+      );
+    }
+
+    getReachablePlatforms(layerIndex, routeSources = this.getRouteSources(layerIndex)) {
+      return this.platformManager.platforms.filter((platform) =>
+        platform.layerIndex === layerIndex &&
+        !platform.removed &&
+        !platform.breaking &&
+        routeSources.some((source) =>
+          PlatformPhysics.getReachability(
+            source,
+            platform,
+            platform.allowWrappingFromPrevious
+          ).reachable
+        )
+      );
+    }
+
+    getPlatformMovementRange(platform) {
+      if (platform.type === PlatformType.MOVING) {
+        return { left: platform.moveMin, right: platform.moveMax + platform.width };
+      }
+      return { left: platform.x, right: platform.x + platform.width };
+    }
+
+    getPlatformLandingRange(platform) {
+      const movementRange = this.getPlatformMovementRange(platform);
+      return {
+        left: Math.max(
+          -GameConfig.playerWidth,
+          movementRange.left + GameConfig.minimumLandingOverlap - GameConfig.playerWidth
+        ),
+        right: Math.min(
+          GameConfig.width,
+          movementRange.right - GameConfig.minimumLandingOverlap
+        )
+      };
+    }
+
+    getMonsterMovementRange(monster) {
+      return {
+        left: monster.moveMin,
+        right: monster.moveMax + monster.width
+      };
+    }
+
+    monsterAffectsPlatform(monster, platform) {
+      return (
+        monster.y < platform.y + platform.height &&
+        monster.y + monster.height >=
+          platform.y - GameConfig.monsterRouteBlockVerticalRange
+      );
+    }
+
+    getUnblockedLandingSegments(platform, monsters) {
+      let segments = [this.getPlatformLandingRange(platform)];
+      for (const monster of monsters) {
+        if (!monster.alive || !this.monsterAffectsPlatform(monster, platform)) {
+          continue;
+        }
+        const range = this.getMonsterMovementRange(monster);
+        const blocked = {
+          left: range.left - GameConfig.playerWidth - GameConfig.monsterAvoidancePadding,
+          right: range.right + GameConfig.monsterAvoidancePadding
+        };
+        const remaining = [];
+        for (const segment of segments) {
+          if (blocked.right <= segment.left || blocked.left >= segment.right) {
+            remaining.push(segment);
+            continue;
+          }
+          if (blocked.left > segment.left) {
+            remaining.push({ left: segment.left, right: blocked.left });
+          }
+          if (blocked.right < segment.right) {
+            remaining.push({ left: blocked.right, right: segment.right });
+          }
+        }
+        segments = remaining;
+      }
+      return segments;
+    }
+
+    hasStompOption(monster, routeSources) {
+      const positions = [monster.moveMin, monster.originX, monster.moveMax];
+      return routeSources.some((source) => positions.some((x) =>
+        PlatformPhysics.getReachability(
+          source,
+          { x, y: monster.y, width: monster.width },
+          true
+        ).reachable
+      ));
+    }
+
+    hasPlayerEscapeOption(
+      candidate,
+      layerIndex = candidate.spawnLayer,
+      reachablePlatforms = this.getReachablePlatforms(layerIndex),
+      routeSources = this.getRouteSources(layerIndex)
+    ) {
+      return !this.wouldBlockAllReachableRoutes(
+        candidate,
+        layerIndex,
+        reachablePlatforms,
+        routeSources
+      );
+    }
+
+    wouldBlockAllReachableRoutes(
+      candidate,
+      layerIndex = candidate.spawnLayer,
+      reachablePlatforms = this.getReachablePlatforms(layerIndex),
+      routeSources = this.getRouteSources(layerIndex)
+    ) {
+      if (reachablePlatforms.length === 0 || routeSources.length === 0) {
+        return true;
+      }
+      const blockers = [
+        ...this.monsters.filter((monster) => monster.alive && monster !== candidate),
+        candidate
+      ];
+
+      return reachablePlatforms.every((platform) => {
+        const relevantBlockers = blockers.filter((monster) =>
+          this.monsterAffectsPlatform(monster, platform)
+        );
+        if (relevantBlockers.length === 0) {
+          return false;
+        }
+        const dangerousOnlyChoice =
+          reachablePlatforms.length === 1 &&
+          (platform.isBreakable || platform.type === PlatformType.MOVING);
+        const requiredEscapeWidth = GameConfig.monsterLandingEscapeWidth *
+          (dangerousOnlyChoice ? 1.35 : 1);
+        const hasLandingSpace = this.getUnblockedLandingSegments(
+          platform,
+          relevantBlockers
+        ).some((segment) => segment.right - segment.left >= requiredEscapeWidth);
+        if (hasLandingSpace) {
+          return false;
+        }
+
+        const sourcesForPlatform = routeSources.filter((source) =>
+          PlatformPhysics.getReachability(
+            source,
+            platform,
+            platform.allowWrappingFromPrevious
+          ).reachable
+        );
+        return !relevantBlockers.some((monster) =>
+          this.hasStompOption(monster, sourcesForPlatform)
+        );
+      });
+    }
+
+    overlapsPlatform(monster) {
+      const monsterRange = this.getMonsterMovementRange(monster);
+      return this.platformManager.platforms.some((platform) => {
+        const platformRange = this.getPlatformMovementRange(platform);
+        return (
+          monsterRange.left < platformRange.right + 2 &&
+          monsterRange.right + 2 > platformRange.left &&
+          monster.y < platform.y + platform.height + 2 &&
+          monster.y + monster.height + 2 > platform.y
+        );
+      });
+    }
+
+    overlapsItem(monster) {
+      const monsterRange = this.getMonsterMovementRange(monster);
+      return this.platformManager.platforms.some((platform) => {
+        const item = platform.item;
+        return item && !item.collected &&
+          monsterRange.left < item.x + item.width + 4 &&
+          monsterRange.right + 4 > item.x &&
+          monster.y < item.y + item.height + 4 &&
+          monster.y + monster.height + 4 > item.y;
+      });
+    }
+
+    overlapsOtherMonster(candidate) {
+      const candidateRange = this.getMonsterMovementRange(candidate);
+      return this.monsters.some((monster) => {
+        if (!monster.alive || monster === candidate) {
+          return false;
+        }
+        const range = this.getMonsterMovementRange(monster);
+        return (
+          candidateRange.left < range.right + GameConfig.monsterSeparationPadding &&
+          candidateRange.right + GameConfig.monsterSeparationPadding > range.left &&
+          candidate.y < monster.y + monster.height + GameConfig.monsterSeparationPadding &&
+          candidate.y + candidate.height + GameConfig.monsterSeparationPadding > monster.y
+        );
+      });
+    }
+  }
+
   class GameRenderer {
     constructor(context) {
       this.context = context;
@@ -1719,6 +2246,8 @@
         spring: "#e7df55",
         propeller: "#b86cff",
         jetpack: "#ef4e4e",
+        monster: "#e45d75",
+        monsterEye: "#18242f",
         text: "#ffffff",
         overlay: "rgba(8, 13, 18, 0.78)",
         button: "#33495c"
@@ -1730,11 +2259,34 @@
       this.context.fillRect(0, 0, GameConfig.width, GameConfig.height);
     }
 
-    drawWorld(player, platforms, debugPlatformGeneration = false) {
+    drawWorld(player, platforms, monsters, debugPlatformGeneration = false) {
       for (const platform of platforms) {
         this.drawPlatform(platform, debugPlatformGeneration);
       }
+      for (const monster of monsters) {
+        this.drawMonster(monster);
+      }
       this.drawPlayer(player);
+    }
+
+    drawMonster(monster) {
+      if (!monster.alive) {
+        return;
+      }
+      const context = this.context;
+      context.save();
+      context.fillStyle = this.colors.monster;
+      context.fillRect(monster.x, monster.y + 4, monster.width, monster.height - 4);
+      context.fillRect(monster.x + 5, monster.y, monster.width - 10, 6);
+      context.fillStyle = this.colors.monsterEye;
+      context.fillRect(monster.x + 8, monster.y + 9, 5, 5);
+      context.fillRect(monster.x + monster.width - 13, monster.y + 9, 5, 5);
+      context.fillStyle = this.colors.text;
+      context.font = "bold 11px Arial, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "bottom";
+      context.fillText("M", monster.x + monster.width * 0.5, monster.y - 2);
+      context.restore();
     }
 
     drawPlayer(player) {
@@ -1935,6 +2487,10 @@
       this.renderer = new GameRenderer(this.context);
       this.difficultyManager = new DifficultyManager();
       this.platformManager = new PlatformManager(this.difficultyManager);
+      this.monsterManager = new MonsterManager(
+        this.difficultyManager,
+        this.platformManager
+      );
       this.input = new InputManager(canvas, (action) => this.handleAction(action));
       this.state = GameState.MENU;
       this.bestScore = this.loadBestScore();
@@ -1956,6 +2512,7 @@
       this.maxHeight = 0;
       this.cameraOffset = 0;
       this.playTime = 0;
+      this.monsterManager.reset();
       const startPlatform = this.platformManager.reset(0);
       const playerX = startPlatform.x + (startPlatform.width - GameConfig.playerWidth) * 0.5;
       const playerY = startPlatform.y - GameConfig.playerHeight;
@@ -2002,8 +2559,14 @@
     update(deltaTime) {
       this.playTime += deltaTime;
       this.platformManager.update(deltaTime);
+      this.monsterManager.update(deltaTime);
       this.player.update(deltaTime, this.input.direction);
       this.resolvePowerUpPickups();
+
+      this.resolveMonsterCollisions();
+      if (this.state !== GameState.PLAYING) {
+        return;
+      }
 
       if (this.player.y > GameConfig.height) {
         this.finishGame();
@@ -2017,7 +2580,11 @@
         ? this.player.remainingFlightDistance +
           PlatformPhysics.getMaximumJumpHeight() * GameConfig.safeVerticalGapRatio
         : 0;
-      this.platformManager.ensurePlatforms(this.score, flightGenerationReserve);
+      const generatedLayers = this.platformManager.ensurePlatforms(
+        this.score,
+        flightGenerationReserve
+      );
+      this.monsterManager.spawnForLayers(generatedLayers);
     }
 
     resolvePowerUpPickups() {
@@ -2099,6 +2666,79 @@
       }
     }
 
+    resolveMonsterCollisions() {
+      const collisions = this.monsterManager.monsters.filter((monster) =>
+        monster.alive && this.playerSweptOverlapsMonster(monster)
+      );
+      if (collisions.length === 0) {
+        return null;
+      }
+
+      if (this.player.isFlying) {
+        for (const monster of collisions) {
+          this.monsterManager.removeMonster(monster, "POWER_UP");
+        }
+        return { type: "POWER_UP", monsters: collisions };
+      }
+
+      const previousBottom = this.player.previousY + this.player.height;
+      const currentBottom = this.player.y + this.player.height;
+      const stomp = collisions
+        .filter((monster) =>
+          this.player.vy > 0 &&
+          previousBottom <= monster.y + 2 &&
+          currentBottom >= monster.y &&
+          this.playerSweptOverlapsMonsterX(monster)
+        )
+        .sort((first, second) => first.y - second.y)[0];
+
+      if (stomp) {
+        this.monsterManager.removeMonster(stomp, "STOMP");
+        this.player.y = stomp.y - this.player.height;
+        this.player.previousY = this.player.y;
+        this.player.launch(GameConfig.monsterStompBounceMultiplier);
+        return { type: "STOMP", monster: stomp };
+      }
+
+      this.finishGame();
+      return { type: "GAME_OVER", monster: collisions[0] };
+    }
+
+    playerSweptOverlapsMonster(monster) {
+      const sweptTop = Math.min(this.player.previousY, this.player.y);
+      const sweptBottom = Math.max(
+        this.player.previousY + this.player.height,
+        this.player.y + this.player.height
+      );
+      if (sweptBottom < monster.y || sweptTop > monster.y + monster.height) {
+        return false;
+      }
+      return this.playerSweptOverlapsMonsterX(monster);
+    }
+
+    playerSweptOverlapsMonsterX(monster) {
+      return this.playerOverlapsMonsterX(monster, this.player.x, monster.x) ||
+        this.playerOverlapsMonsterX(monster, this.player.previousX, monster.x) ||
+        this.playerOverlapsMonsterX(monster, this.player.x, monster.previousX) ||
+        this.playerOverlapsMonsterX(monster, this.player.previousX, monster.previousX);
+    }
+
+    playerOverlapsMonsterX(
+      monster,
+      playerX = this.player.x,
+      monsterX = monster.x
+    ) {
+      const playerRight = playerX + this.player.width;
+      for (const offset of [-GameConfig.width, 0, GameConfig.width]) {
+        const left = monsterX + offset;
+        const right = left + monster.width;
+        if (playerRight >= left && playerX <= right) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     crossesTop(previousBottom, currentBottom, top) {
       const tolerance = 2;
       return previousBottom <= top + tolerance && currentBottom >= top;
@@ -2124,6 +2764,7 @@
         this.player.y = thresholdY;
         this.player.previousY += scrollDistance;
         this.platformManager.scroll(scrollDistance);
+        this.monsterManager.scroll(scrollDistance);
         this.cameraOffset += scrollDistance;
       }
     }
@@ -2166,6 +2807,7 @@
       this.renderer.drawWorld(
         this.player,
         this.platformManager.platforms,
+        this.monsterManager.monsters,
         this.platformManager.debugEnabled
       );
 
@@ -2200,6 +2842,29 @@
           rejectedCandidates: {
             ...this.platformManager.stats.rejectedCandidates
           }
+        },
+        monsters: {
+          activeCount: this.monsterManager.monsters.filter((monster) => monster.alive).length,
+          stats: {
+            ...this.monsterManager.stats,
+            rejectedCandidates: {
+              ...this.monsterManager.stats.rejectedCandidates
+            }
+          },
+          entries: this.monsterManager.monsters.map((monster) => ({
+            x: round(monster.x),
+            y: round(monster.y),
+            width: monster.width,
+            height: monster.height,
+            vx: round(monster.vx),
+            originX: round(monster.originX),
+            moveRange: monster.moveRange,
+            type: monster.type,
+            alive: monster.alive,
+            spawnLayer: monster.spawnLayer,
+            spawnScore: monster.spawnScore,
+            anchorIsGuaranteed: monster.anchorIsGuaranteed
+          }))
         },
         player: {
           x: Math.round(this.player.x * 100) / 100,

@@ -28,6 +28,9 @@ The player jumps automatically whenever it lands on a platform.
 - Spring items with a stronger jump and a 45% early / 30% late spawn chance
 - Propeller Hats spawn from 8,000 points, decreasing from 15% to 5% by 12,000
 - Jetpacks spawn from 6,000 points at 10%, decreasing to 5% from 8,000 to 12,000
+- BASIC_HOVER_MONSTER enemies that patrol horizontally from 4,000 points
+- Swept stomp collision, lethal body collision, and flight power-up enemy removal
+- Route-aware monster placement that preserves at least one realistic response
 - Power-up-aware spawn-ahead generation
 - Upward-only camera scrolling
 - Height-based score and locally saved best score
@@ -44,6 +47,7 @@ Run the deterministic platform-generation regression suite with Node.js:
 ```text
 node platform-generation.test.js
 node powerup.test.js
+node monster.test.js
 ```
 
 When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`) and filler (`F`) platforms and reproduces the same layout. Debug display is disabled by default. Runtime power-up state and remaining flight distance are available through `window.speakiJump.getSnapshot()`.
@@ -62,6 +66,7 @@ speaki-e-jump/
 ├── index.html
 ├── platform-generation.test.js
 ├── powerup.test.js
+├── monster.test.js
 ├── README.md
 └── style.css
 ```
