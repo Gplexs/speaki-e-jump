@@ -519,6 +519,8 @@ test("the real Game.update pickup path suppresses a same-frame platform bounce",
 });
 
 test("timed flight has exact rise, ignores gravity, and returns naturally to gravity", () => {
+  assert.equal(GameConfig.propellerFlightSpeed, 350);
+  assert.equal(GameConfig.jetpackFlightSpeed, 650);
   assert(GameConfig.jetpackFlightSpeed > GameConfig.propellerFlightSpeed);
   assert(
     GameConfig.jetpackFlightSpeed * GameConfig.jetpackDuration >

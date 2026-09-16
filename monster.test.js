@@ -433,6 +433,8 @@ test("Propeller Hat and Jetpack remove monsters without consuming flight", () =>
     game.player.previousY = 300;
     game.player.activatePowerUp(type);
     const timer = game.player.powerUpTimer;
+    const flightSpeed = game.player.powerUpFlightSpeed;
+    const startY = game.player.y;
 
     const result = game.resolveMonsterCollisions();
     assert.equal(result?.type, "POWER_UP");
@@ -440,7 +442,12 @@ test("Propeller Hat and Jetpack remove monsters without consuming flight", () =>
     assert.equal(game.state, GameState.PLAYING);
     assert.equal(game.player.activePowerUp, type);
     assert.equal(game.player.powerUpTimer, timer);
+    assert.equal(game.player.vy, -flightSpeed);
     assert.equal(game.monsterManager.stats.removedByPowerUp, 1);
+
+    game.player.update(0.1, 0);
+    approximately(game.player.y, startY - flightSpeed * 0.1);
+    assert.equal(game.state, GameState.PLAYING);
   }
 });
 
