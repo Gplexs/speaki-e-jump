@@ -27,6 +27,16 @@
     guaranteedBreakableScoreThreshold: 8000,
     guaranteedBreakableChance: 0.25,
     movingBreakableChance: 0.2,
+    fallThroughFillerScoreThreshold: 10000,
+    fallThroughFillerChance: 0.3,
+    guaranteedFallThroughScoreThreshold: 10000,
+    guaranteedFallThroughChance: 0.1,
+    guaranteedMovingScoreThreshold: 15000,
+    guaranteedMovingChance: 0.2,
+    guaranteedMovingMinRange: 24,
+    guaranteedMovingMaxRange: 40,
+    guaranteedMovingMinSpeed: 48,
+    guaranteedMovingMaxSpeed: 68,
     earlyFillerScoreThreshold: 3000,
     earlyOneFillerChance: 0.6,
     earlyTwoFillerChance: 0.25,
@@ -88,7 +98,8 @@
   const PlatformType = Object.freeze({
     NORMAL: "NORMAL",
     MOVING: "MOVING",
-    BREAKABLE: "BREAKABLE"
+    BREAKABLE: "BREAKABLE",
+    FALL_THROUGH: "FALL_THROUGH"
   });
 
   const ItemType = Object.freeze({
@@ -635,12 +646,14 @@
       this.height = GameConfig.platformHeight;
       this.type = type;
       this.item = null;
-      this.isBreakable = type === PlatformType.BREAKABLE;
+      this.isFallThrough = type === PlatformType.FALL_THROUGH;
+      this.isBreakable = type === PlatformType.BREAKABLE || this.isFallThrough;
       this.breaking = false;
       this.breakTimer = 0;
       this.removed = false;
       this.layerIndex = 0;
       this.isGuaranteed = false;
+      this.isRouteContinuation = false;
       this.allowWrappingFromPrevious = false;
       this.generationFallback = false;
       this.generationSettings = null;
@@ -840,6 +853,7 @@
         );
 
       return {
+        score,
         level,
         opening,
         earlyAssistance,
@@ -849,6 +863,10 @@
         maxWidth: opening ? 116 : lerp(116, 96, level),
         movingChance: lerp(0.06, 0.23, level),
         breakableChance: lerp(0.04, 0.18, level),
+        fallThroughChance: !opening &&
+          score < GameConfig.fallThroughFillerScoreThreshold
+          ? GameConfig.fallThroughFillerChance
+          : 0,
         springChance: this.getSpringChance(),
         oneFillerChance: earlyAssistance
           ? GameConfig.earlyOneFillerChance
@@ -883,10 +901,25 @@
         ? null
         : `${this.seed}:moving-breakables`;
       this.movingBreakableRandom = new RandomSource(this.movingBreakableSeed);
+      this.fallThroughFillerSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:fall-through-fillers`;
+      this.fallThroughFillerRandom = new RandomSource(this.fallThroughFillerSeed);
+      this.guaranteedFallThroughSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:guaranteed-fall-through`;
+      this.guaranteedFallThroughRandom = new RandomSource(
+        this.guaranteedFallThroughSeed
+      );
+      this.guaranteedMovingSeed = this.seed === null || this.seed === undefined
+        ? null
+        : `${this.seed}:guaranteed-moving`;
+      this.guaranteedMovingRandom = new RandomSource(this.guaranteedMovingSeed);
       this.platforms = [];
       this.generatedCount = 0;
       this.layerIndex = 0;
       this.lastGuaranteedPlatform = null;
+      this.lastRoutePlatform = null;
       this.highestGeneratedY = GameConfig.startPlatformY;
       this.recentGuaranteed = [];
       this.recentVerticalGaps = [];
@@ -903,6 +936,9 @@
         skippedFillers: 0,
         guaranteedBreakablesGenerated: 0,
         movingBreakablesGenerated: 0,
+        fallThroughFillersGenerated: 0,
+        guaranteedFallThroughGenerated: 0,
+        guaranteedMovingGenerated: 0,
         itemsGenerated: {
           [ItemType.SPRING]: 0,
           [ItemType.PROPELLER_HAT]: 0,
@@ -927,6 +963,9 @@
       this.itemRandom.reset(this.itemSeed);
       this.routeTypeRandom.reset(this.routeTypeSeed);
       this.movingBreakableRandom.reset(this.movingBreakableSeed);
+      this.fallThroughFillerRandom.reset(this.fallThroughFillerSeed);
+      this.guaranteedFallThroughRandom.reset(this.guaranteedFallThroughSeed);
+      this.guaranteedMovingRandom.reset(this.guaranteedMovingSeed);
       this.generatedCount = 1;
       this.layerIndex = 0;
       this.recentGuaranteed.length = 0;
@@ -946,9 +985,11 @@
         this.random
       );
       start.isGuaranteed = true;
+      start.isRouteContinuation = true;
       start.layerIndex = 0;
       this.platforms.push(start);
       this.lastGuaranteedPlatform = start;
+      this.lastRoutePlatform = start;
       this.highestGeneratedY = start.y;
       this.recentGuaranteed.push(start);
       this.stats.platformsGenerated = 1;
@@ -998,10 +1039,10 @@
     generateNextLayer(score) {
       const nextLayerIndex = this.layerIndex + 1;
       const settings = this.getDifficultySettings(score, nextLayerIndex);
-      const previousGuaranteed = this.lastGuaranteedPlatform;
-      const routeSources = this.getRequiredRouteSources(previousGuaranteed);
+      const previousRoute = this.lastRoutePlatform;
+      const routeSources = this.getRequiredRouteSources(previousRoute);
       const guaranteed = this.generateGuaranteedPlatform(
-        previousGuaranteed,
+        previousRoute,
         settings,
         nextLayerIndex,
         routeSources
@@ -1010,7 +1051,7 @@
 
       this.platforms.push(guaranteed);
       const fillers = this.generateFillerPlatforms(
-        previousGuaranteed,
+        previousRoute,
         guaranteed,
         settings,
         nextLayerIndex
@@ -1018,14 +1059,29 @@
       this.platforms.push(...fillers);
       this.tryAddFlightPowerUp(guaranteed, nextLayerIndex, score);
 
+      let routePlatform = guaranteed;
+      if (guaranteed.isFallThrough) {
+        routePlatform = fillers.find((platform) => !platform.isFallThrough) || null;
+        if (!routePlatform) {
+          guaranteed.type = PlatformType.NORMAL;
+          guaranteed.isBreakable = false;
+          guaranteed.isFallThrough = false;
+          this.stats.guaranteedFallThroughGenerated -= 1;
+          routePlatform = guaranteed;
+        }
+      }
+      guaranteed.isRouteContinuation = routePlatform === guaranteed;
+      routePlatform.isRouteContinuation = true;
+
       this.layerIndex = nextLayerIndex;
       this.lastGuaranteedPlatform = guaranteed;
-      this.highestGeneratedY = guaranteed.y;
-      this.recentGuaranteed.push(guaranteed);
+      this.lastRoutePlatform = routePlatform;
+      this.highestGeneratedY = routePlatform.y;
+      this.recentGuaranteed.push(routePlatform);
       if (this.recentGuaranteed.length > 10) {
         this.recentGuaranteed.shift();
       }
-      const verticalGap = previousGuaranteed.y - guaranteed.y;
+      const verticalGap = previousRoute.y - routePlatform.y;
       this.recentVerticalGaps.push(verticalGap);
       if (this.recentVerticalGaps.length > 8) {
         this.recentVerticalGaps.shift();
@@ -1042,39 +1098,89 @@
 
       if (this.debugEnabled) {
         const reach = PlatformPhysics.getReachability(
-          previousGuaranteed,
-          guaranteed,
-          guaranteed.allowWrappingFromPrevious
+          previousRoute,
+          routePlatform,
+          routePlatform.allowWrappingFromPrevious
         );
         console.debug("[Platform layer]", {
           layer: nextLayerIndex,
-          x: round(guaranteed.x),
-          y: round(guaranteed.y),
+          x: round(routePlatform.x),
+          y: round(routePlatform.y),
           verticalGap: round(reach.verticalGap),
           horizontalDistance: round(reach.horizontalDistance),
           safeHorizontalReach: round(reach.safeCenterReach),
           reachable: reach.reachable,
           fillers: fillers.length,
-          fallback: guaranteed.generationFallback
+          fallback: guaranteed.generationFallback,
+          guaranteedType: guaranteed.type,
+          routeUsesAlternative: routePlatform !== guaranteed
         });
       }
 
-      return { guaranteed, fillers, settings };
+      return { guaranteed, fillers, routePlatform, settings };
     }
 
     applyGuaranteedPlatformDifficulty(platform, score) {
       platform.generationScore = score;
       if (
-        score < GameConfig.guaranteedBreakableScoreThreshold ||
-        !this.routeTypeRandom.chance(GameConfig.guaranteedBreakableChance)
+        score >= GameConfig.guaranteedFallThroughScoreThreshold &&
+        this.guaranteedFallThroughRandom.chance(
+          GameConfig.guaranteedFallThroughChance
+        )
       ) {
-        return false;
+        platform.type = PlatformType.FALL_THROUGH;
+        platform.isFallThrough = true;
+        platform.isBreakable = true;
+        this.stats.guaranteedFallThroughGenerated += 1;
+        return true;
       }
 
-      platform.type = PlatformType.BREAKABLE;
-      platform.isBreakable = true;
-      this.stats.guaranteedBreakablesGenerated += 1;
-      return true;
+      let changed = false;
+      // FALL_THROUGH is evaluated first, so normalize the remaining roll to
+      // keep the configured moving chance at 20% of all Guaranteed slots.
+      const movingChanceAfterFallThroughCheck =
+        GameConfig.guaranteedMovingChance /
+        (1 - GameConfig.guaranteedFallThroughChance);
+      if (
+        score >= GameConfig.guaranteedMovingScoreThreshold &&
+        this.guaranteedMovingRandom.chance(movingChanceAfterFallThroughCheck)
+      ) {
+        this.configureGuaranteedMovingPlatform(platform);
+        this.stats.guaranteedMovingGenerated += 1;
+        changed = true;
+      }
+
+      if (
+        score >= GameConfig.guaranteedBreakableScoreThreshold &&
+        this.routeTypeRandom.chance(GameConfig.guaranteedBreakableChance)
+      ) {
+        if (platform.type === PlatformType.NORMAL) {
+          platform.type = PlatformType.BREAKABLE;
+        }
+        platform.isBreakable = true;
+        this.stats.guaranteedBreakablesGenerated += 1;
+        changed = true;
+      }
+      return changed;
+    }
+
+    configureGuaranteedMovingPlatform(platform) {
+      const moveRange = this.guaranteedMovingRandom.range(
+        GameConfig.guaranteedMovingMinRange,
+        GameConfig.guaranteedMovingMaxRange
+      );
+      platform.type = PlatformType.MOVING;
+      platform.moveMin = Math.max(GameConfig.sidePadding, platform.x - moveRange);
+      platform.moveMax = Math.min(
+        GameConfig.width - platform.width - GameConfig.sidePadding,
+        platform.x + moveRange
+      );
+      platform.moveSpeed = this.guaranteedMovingRandom.range(
+        GameConfig.guaranteedMovingMinSpeed,
+        GameConfig.guaranteedMovingMaxSpeed
+      );
+      platform.moveDirection = this.guaranteedMovingRandom.chance(0.5) ? -1 : 1;
+      return platform;
     }
 
     applyMovingPlatformDifficulty(platform) {
@@ -1188,7 +1294,8 @@
       return this.platforms.filter(
         (platform) =>
           platform.layerIndex === previousGuaranteed.layerIndex &&
-          !platform.removed
+          !platform.removed &&
+          !platform.isFallThrough
       );
     }
 
@@ -1394,17 +1501,24 @@
     }
 
     generateFillerPlatforms(previous, guaranteed, settings, layerIndex) {
-      const desiredCount = this.chooseFillerCount(settings);
+      const needsRouteAlternative = guaranteed.isFallThrough;
+      const desiredCount = Math.max(
+        needsRouteAlternative ? 1 : 0,
+        this.chooseFillerCount(settings)
+      );
       const fillers = [];
 
       for (let fillerIndex = 0; fillerIndex < desiredCount; fillerIndex += 1) {
+        const forceRouteContinuation = needsRouteAlternative && fillerIndex === 0;
         let created = null;
         for (let attempt = 0; attempt < GameConfig.maxGenerationAttempts; attempt += 1) {
           const width = this.random.range(settings.minWidth * 0.88, settings.maxWidth);
-          const y = guaranteed.y + this.random.range(
-            -GameConfig.layerYVariation,
-            GameConfig.layerYVariation
-          );
+          const y = forceRouteContinuation
+            ? guaranteed.y
+            : guaranteed.y + this.random.range(
+              -GameConfig.layerYVariation,
+              GameConfig.layerYVariation
+            );
           // Every filler is a genuine alternative for the same jump rather than
           // decorative clutter that can only be reached after the guaranteed one.
           const anchor = previous;
@@ -1425,7 +1539,12 @@
           }
 
           let type = PlatformType.NORMAL;
-          if (!settings.opening && !settings.earlyAssistance) {
+          if (
+            !forceRouteContinuation &&
+            this.fallThroughFillerRandom.chance(settings.fallThroughChance)
+          ) {
+            type = PlatformType.FALL_THROUGH;
+          } else if (!settings.opening && !settings.earlyAssistance) {
             const typeRoll = this.random.next();
             if (typeRoll < settings.movingChance) {
               type = PlatformType.MOVING;
@@ -1449,6 +1568,7 @@
             this.random
           );
           candidate.layerIndex = layerIndex;
+          candidate.generationScore = settings.score;
           candidate.isGuaranteed = false;
           candidate.allowWrappingFromPrevious = allowWrapping;
           candidate.generationSettings = settings;
@@ -1468,6 +1588,9 @@
           }
 
           candidate.reachability = reach;
+          if (type === PlatformType.FALL_THROUGH) {
+            this.stats.fallThroughFillersGenerated += 1;
+          }
           if (
             type === PlatformType.NORMAL &&
             this.random.chance(settings.springChance) &&
@@ -1482,16 +1605,19 @@
 
         if (
           !created &&
-          settings.opening &&
           fillerIndex === 0 &&
-          this.layersSinceFiller >= 2
+          (
+            forceRouteContinuation ||
+            (settings.opening && this.layersSinceFiller >= 2)
+          )
         ) {
-          created = this.createOpeningFillerFallback(
+          created = this.createFillerFallback(
             previous,
             guaranteed,
             settings,
             layerIndex,
-            fillers
+            fillers,
+            forceRouteContinuation
           );
         }
 
@@ -1505,26 +1631,29 @@
       return fillers;
     }
 
-    createOpeningFillerFallback(
+    createFillerFallback(
       anchor,
       guaranteed,
       settings,
       layerIndex,
-      additionalPlatforms
+      additionalPlatforms,
+      sameHeightOnly = false
     ) {
-      // A rare forced opening choice may need a narrower landing surface to fit
+      // A required alternate route may need a narrower landing surface to fit
       // safely between a screen edge and the Guaranteed Platform.
       const width = Math.max(72, settings.minWidth * 0.7);
       const halfWidth = width * 0.5;
       const anchorCenter = anchor.x + anchor.width * 0.5;
       const guaranteedCenter = guaranteed.x + guaranteed.width * 0.5;
-      const verticalVariations = [
-        0,
-        -GameConfig.layerYVariation,
-        GameConfig.layerYVariation,
-        -GameConfig.layerYVariation * 0.5,
-        GameConfig.layerYVariation * 0.5
-      ];
+      const verticalVariations = sameHeightOnly
+        ? [0]
+        : [
+            0,
+            -GameConfig.layerYVariation,
+            GameConfig.layerYVariation,
+            -GameConfig.layerYVariation * 0.5,
+            GameConfig.layerYVariation * 0.5
+          ];
 
       for (const variation of verticalVariations) {
         const y = guaranteed.y + variation;
@@ -1576,6 +1705,7 @@
             this.random
           );
           candidate.layerIndex = layerIndex;
+          candidate.generationScore = settings.score;
           candidate.isGuaranteed = false;
           candidate.allowWrappingFromPrevious = false;
           candidate.generationSettings = settings;
@@ -1715,10 +1845,11 @@
           layerCountViolations += 1;
         }
 
+        const routePlatform = layer.routePlatform || layer.guaranteed;
         const reach = PlatformPhysics.getReachability(
           previous,
-          layer.guaranteed,
-          layer.guaranteed.allowWrappingFromPrevious
+          routePlatform,
+          routePlatform.allowWrappingFromPrevious
         );
         if (!reach.reachable) {
           unreachableGuaranteed += 1;
@@ -1750,7 +1881,7 @@
           checkedAdditions.push(platform);
           allPlatforms.push(platform);
         }
-        previous = layer.guaranteed;
+        previous = routePlatform;
         // Keep production candidate checks bounded like runtime cleanup while
         // retaining all generated platforms separately for aggregate metrics.
         manager.platforms = manager.platforms.filter(
@@ -1790,6 +1921,9 @@
         skippedFillers: manager.stats.skippedFillers,
         guaranteedBreakablesGenerated: manager.stats.guaranteedBreakablesGenerated,
         movingBreakablesGenerated: manager.stats.movingBreakablesGenerated,
+        fallThroughFillersGenerated: manager.stats.fallThroughFillersGenerated,
+        guaranteedFallThroughGenerated: manager.stats.guaranteedFallThroughGenerated,
+        guaranteedMovingGenerated: manager.stats.guaranteedMovingGenerated,
         itemsGenerated: { ...manager.stats.itemsGenerated },
         maximumJumpHeight: round(PlatformPhysics.getMaximumJumpHeight()),
         safeVerticalReach: round(
@@ -2040,7 +2174,8 @@
       return this.platformManager.platforms.filter((platform) =>
         platform.layerIndex === layerIndex - 1 &&
         !platform.removed &&
-        !platform.breaking
+        !platform.breaking &&
+        !platform.isFallThrough
       );
     }
 
@@ -2049,6 +2184,7 @@
         platform.layerIndex === layerIndex &&
         !platform.removed &&
         !platform.breaking &&
+        !platform.isFallThrough &&
         routeSources.some((source) =>
           PlatformPhysics.getReachability(
             source,
@@ -2247,6 +2383,7 @@
         normal: "#49b36b",
         moving: "#418ad6",
         breakable: "#dc8735",
+        fallThrough: "#b45555",
         spring: "#e7df55",
         propeller: "#b86cff",
         jetpack: "#ef4e4e",
@@ -2319,7 +2456,8 @@
       const colorByType = {
         [PlatformType.NORMAL]: this.colors.normal,
         [PlatformType.MOVING]: this.colors.moving,
-        [PlatformType.BREAKABLE]: this.colors.breakable
+        [PlatformType.BREAKABLE]: this.colors.breakable,
+        [PlatformType.FALL_THROUGH]: this.colors.fallThrough
       };
       const context = this.context;
       context.save();
@@ -2345,7 +2483,9 @@
         context.textAlign = "center";
         context.textBaseline = "bottom";
         context.fillText(
-          platform.isGuaranteed ? "G" : "F",
+          platform.isRouteContinuation && !platform.isGuaranteed
+            ? "R"
+            : platform.isGuaranteed ? "G" : "F",
           platform.x + platform.width * 0.5,
           platform.y - 3
         );
@@ -2663,6 +2803,10 @@
       }
 
       if (selected) {
+        if (selected.platform.isFallThrough) {
+          selected.platform.beginBreaking();
+          return;
+        }
         this.player.y = selected.top - this.player.height;
         this.player.previousY = this.player.y;
         this.player.launch(selected.spring ? GameConfig.springJumpMultiplier : 1);
@@ -2840,6 +2984,12 @@
           guaranteedBreakablesGenerated:
             this.platformManager.stats.guaranteedBreakablesGenerated,
           movingBreakablesGenerated: this.platformManager.stats.movingBreakablesGenerated,
+          fallThroughFillersGenerated:
+            this.platformManager.stats.fallThroughFillersGenerated,
+          guaranteedFallThroughGenerated:
+            this.platformManager.stats.guaranteedFallThroughGenerated,
+          guaranteedMovingGenerated:
+            this.platformManager.stats.guaranteedMovingGenerated,
           itemsGenerated: {
             ...this.platformManager.stats.itemsGenerated
           },
@@ -2886,11 +3036,13 @@
           width: Math.round(platform.width * 100) / 100,
           type: platform.type,
           isBreakable: platform.isBreakable,
+          isFallThrough: platform.isFallThrough,
           itemType: platform.item?.type || null,
           hasSpring: platform.item?.type === ItemType.SPRING,
           breaking: platform.breaking,
           layerIndex: platform.layerIndex,
           isGuaranteed: platform.isGuaranteed,
+          isRouteContinuation: platform.isRouteContinuation,
           generationFallback: platform.generationFallback,
           allowWrappingFromPrevious: platform.allowWrappingFromPrevious
         }))

@@ -136,7 +136,9 @@ function copyPlatform(platform, scrollOffset) {
     itemType: platform.item?.type || null,
     height: platform.height,
     isBreakable: Boolean(platform.isBreakable),
+    isFallThrough: Boolean(platform.isFallThrough),
     isGuaranteed: Boolean(platform.isGuaranteed),
+    isRouteContinuation: Boolean(platform.isRouteContinuation),
     layerIndex: platform.layerIndex,
     moveMax: platform.moveMax,
     moveMin: platform.moveMin,
@@ -175,6 +177,8 @@ function signature(platforms, layerLimit = Infinity) {
       round(platform.width),
       platform.type,
       platform.isBreakable,
+      platform.isFallThrough,
+      platform.isRouteContinuation,
       platform.itemType,
       platform.allowWrappingFromPrevious,
       platform.generationFallback
@@ -375,7 +379,15 @@ function validateGeneratedPlatforms(run) {
   for (const layerIndex of layerIndices) {
     const layer = groups.get(layerIndex);
     const guaranteed = layer.filter((platform) => platform.isGuaranteed);
+    const routeContinuations = layer.filter(
+      (platform) => platform.isRouteContinuation
+    );
     assert.equal(guaranteed.length, 1, `layer ${layerIndex} must contain one guaranteed platform`);
+    assert.equal(
+      routeContinuations.length,
+      1,
+      `layer ${layerIndex} must contain one route continuation`
+    );
     assert(
       layer.length >= 1 && layer.length <= 3,
       `layer ${layerIndex} has ${layer.length} platforms instead of 1..3`
@@ -385,31 +397,57 @@ function validateGeneratedPlatforms(run) {
   const guaranteed = generated
     .filter((platform) => platform.isGuaranteed)
     .sort((a, b) => a.layerIndex - b.layerIndex);
+  const routeContinuations = generated
+    .filter((platform) => platform.isRouteContinuation)
+    .sort((a, b) => a.layerIndex - b.layerIndex);
+  assert.equal(routeContinuations.length, guaranteed.length);
   let unreachable = 0;
   let independentUnreachable = 0;
   let breakableEligible = 0;
   let breakableGuaranteed = 0;
+  let fallThroughEligible = 0;
+  let fallThroughGuaranteed = 0;
+  let movingGuaranteedEligible = 0;
+  let movingGuaranteed = 0;
   const verticalGaps = [];
   const safeHorizontalTravels = [];
 
   for (let index = 1; index < guaranteed.length; index += 1) {
-    const previous = guaranteed[index - 1];
     const current = guaranteed[index];
-    const verticalGap = previous.worldY - current.worldY;
-    verticalGaps.push(verticalGap);
-    assert(verticalGap > 0, `layer ${current.layerIndex} did not move upward`);
-    if (current.generationScore < GameConfig.guaranteedBreakableScoreThreshold) {
-      assert.notEqual(
-        current.type,
-        PlatformType.BREAKABLE,
-        `layer ${current.layerIndex} became BREAKABLE before 8,000 points`
-      );
+    if (current.generationScore >= GameConfig.guaranteedFallThroughScoreThreshold) {
+      fallThroughEligible += 1;
+      if (current.isFallThrough) {
+        fallThroughGuaranteed += 1;
+      }
     } else {
+      assert.equal(current.isFallThrough, false);
+    }
+    if (current.generationScore < GameConfig.guaranteedBreakableScoreThreshold) {
+      assert.equal(current.isBreakable, false);
+    } else if (!current.isFallThrough) {
       breakableEligible += 1;
-      if (current.type === PlatformType.BREAKABLE) {
+      if (current.isBreakable) {
         breakableGuaranteed += 1;
       }
     }
+
+    if (current.generationScore >= GameConfig.guaranteedMovingScoreThreshold) {
+      movingGuaranteedEligible += 1;
+      if (current.type === PlatformType.MOVING) {
+        movingGuaranteed += 1;
+      }
+    } else if (current.generationScore < GameConfig.guaranteedMovingScoreThreshold) {
+      assert.notEqual(current.type, PlatformType.MOVING);
+    }
+  }
+
+  for (let index = 1; index < routeContinuations.length; index += 1) {
+    const previous = routeContinuations[index - 1];
+    const current = routeContinuations[index];
+    const verticalGap = previous.worldY - current.worldY;
+    verticalGaps.push(verticalGap);
+    assert(verticalGap > 0, `layer ${current.layerIndex} did not move upward`);
+    assert.equal(current.isFallThrough, false, "route continuation cannot fall through");
 
     const reachability = PlatformPhysics.getReachability(
       { x: previous.x, y: previous.worldY, width: previous.width },
@@ -475,6 +513,16 @@ function validateGeneratedPlatforms(run) {
   assert(
     guaranteedBreakableRate >= 0.21 && guaranteedBreakableRate <= 0.29,
     `post-8,000 Guaranteed BREAKABLE rate ${guaranteedBreakableRate} is not near 25%`
+  );
+  const guaranteedFallThroughRate = fallThroughGuaranteed / fallThroughEligible;
+  assert(
+    guaranteedFallThroughRate >= 0.07 && guaranteedFallThroughRate <= 0.13,
+    `post-10,000 Guaranteed FALL_THROUGH rate ${guaranteedFallThroughRate} is not near 10%`
+  );
+  const guaranteedMovingRate = movingGuaranteed / movingGuaranteedEligible;
+  assert(
+    guaranteedMovingRate >= 0.15 && guaranteedMovingRate <= 0.25,
+    `post-15,000 Guaranteed MOVING rate ${guaranteedMovingRate} is not near 20%`
   );
 
   const sortedByY = generated.slice().sort((a, b) => a.worldY - b.worldY);
@@ -553,6 +601,8 @@ function validateGeneratedPlatforms(run) {
     generatedPlatformCount: generated.length,
     guaranteedCount: guaranteed.length,
     guaranteedBreakableRate: round(guaranteedBreakableRate, 4),
+    guaranteedFallThroughRate: round(guaranteedFallThroughRate, 4),
+    guaranteedMovingRate: round(guaranteedMovingRate, 4),
     horizontalBucketCounts: buckets,
     independentUnreachable,
     maxSafeHorizontalTravel: round(Math.max(...safeHorizontalTravels), 3),
@@ -879,6 +929,7 @@ function validateDifficultyTransitions() {
     DifficultyManager,
     Platform,
     PlatformManager,
+    PlatformPhysics,
     PlatformType
   } = harness.internals;
   const difficulty = new DifficultyManager();
@@ -913,8 +964,11 @@ function validateDifficultyTransitions() {
     const layer = earlyManager.generateNextLayer(GameConfig.earlyFillerScoreThreshold);
     earlyFillerCount += layer.fillers.length;
     for (const filler of layer.fillers) {
-      assert.equal(filler.type, PlatformType.NORMAL);
-      assert.equal(filler.isBreakable, false);
+      assert(
+        filler.type === PlatformType.NORMAL ||
+          filler.type === PlatformType.FALL_THROUGH
+      );
+      assert.equal(filler.isBreakable, filler.isFallThrough);
     }
     earlyManager.platforms = earlyManager.platforms.filter(
       (platform) => platform.y < earlyManager.highestGeneratedY + GameConfig.height
@@ -925,6 +979,136 @@ function validateDifficultyTransitions() {
     averageEarlyFillers >= 0.65,
     `early route averaged only ${averageEarlyFillers} filler platforms per layer`
   );
+
+  assert.equal(GameConfig.fallThroughFillerScoreThreshold, 10000);
+  assert.equal(GameConfig.fallThroughFillerChance, 0.3);
+  assert.equal(GameConfig.guaranteedFallThroughScoreThreshold, 10000);
+  assert.equal(GameConfig.guaranteedFallThroughChance, 0.1);
+  assert.equal(GameConfig.guaranteedMovingScoreThreshold, 15000);
+  assert.equal(GameConfig.guaranteedMovingChance, 0.2);
+
+  const fillerHazardManager = new PlatformManager(difficulty, {
+    seed: "fall-through-filler-rate",
+    debugEnabled: false
+  });
+  fillerHazardManager.reset(0, false);
+  let eligibleFillers = 0;
+  let fallThroughFillers = 0;
+  for (let index = 0; index < 5000; index += 1) {
+    const layer = fillerHazardManager.generateNextLayer(5000);
+    if (layer.settings.fallThroughChance > 0) {
+      for (const filler of layer.fillers) {
+        eligibleFillers += 1;
+        if (filler.isFallThrough) {
+          fallThroughFillers += 1;
+          assert.equal(filler.type, PlatformType.FALL_THROUGH);
+          assert.equal(filler.isGuaranteed, false);
+          assert.equal(filler.item, null);
+        }
+      }
+    }
+    fillerHazardManager.platforms = fillerHazardManager.platforms.filter(
+      (platform) => platform.y <
+        fillerHazardManager.highestGeneratedY + GameConfig.height
+    );
+  }
+  const fallThroughFillerRate = fallThroughFillers / eligibleFillers;
+  assert(
+    fallThroughFillerRate >= 0.27 && fallThroughFillerRate <= 0.33,
+    `sub-10,000 FALL_THROUGH filler rate ${fallThroughFillerRate} is not near 30%`
+  );
+  assert.equal(
+    fillerHazardManager.stats.fallThroughFillersGenerated,
+    fallThroughFillers
+  );
+
+  const guaranteedHazardManager = new PlatformManager(difficulty, {
+    seed: "guaranteed-hazard-rates",
+    debugEnabled: false
+  });
+  guaranteedHazardManager.reset(0, false);
+  let guaranteedHazards = 0;
+  const guaranteedHazardSamples = 5000;
+  for (let index = 0; index < guaranteedHazardSamples; index += 1) {
+    const previousRoute = guaranteedHazardManager.lastRoutePlatform;
+    const layer = guaranteedHazardManager.generateNextLayer(10000);
+    assert.equal(layer.routePlatform.isFallThrough, false);
+    assert.equal(layer.routePlatform.isRouteContinuation, true);
+    assert.equal(
+      PlatformPhysics.getReachability(
+        previousRoute,
+        layer.routePlatform,
+        layer.routePlatform.allowWrappingFromPrevious
+      ).reachable,
+      true
+    );
+    if (layer.guaranteed.isFallThrough) {
+      guaranteedHazards += 1;
+      assert.notEqual(layer.routePlatform, layer.guaranteed);
+      assert.equal(layer.guaranteed.isRouteContinuation, false);
+    }
+    for (const filler of layer.fillers) {
+      assert.equal(filler.isFallThrough, false);
+    }
+    guaranteedHazardManager.platforms = guaranteedHazardManager.platforms.filter(
+      (platform) => platform.y <
+        guaranteedHazardManager.highestGeneratedY + GameConfig.height
+    );
+  }
+  const guaranteedFallThroughRate = guaranteedHazards / guaranteedHazardSamples;
+  assert(
+    guaranteedFallThroughRate >= 0.08 && guaranteedFallThroughRate <= 0.12,
+    `post-10,000 Guaranteed FALL_THROUGH rate ${guaranteedFallThroughRate} is not near 10%`
+  );
+
+  const guaranteedMovingManager = new PlatformManager(difficulty, {
+    seed: "guaranteed-moving-rate",
+    debugEnabled: false
+  });
+  guaranteedMovingManager.reset(0, false);
+  let guaranteedMovingCount = 0;
+  let guaranteedMovingEligible = 0;
+  const guaranteedMovingSamples = 5000;
+  for (let index = 0; index < guaranteedMovingSamples; index += 1) {
+    const layer = guaranteedMovingManager.generateNextLayer(15000);
+    guaranteedMovingEligible += 1;
+    if (layer.guaranteed.type === PlatformType.MOVING) {
+      guaranteedMovingCount += 1;
+      assert(layer.guaranteed.moveMin < layer.guaranteed.moveMax);
+      assert(layer.guaranteed.moveSpeed >= GameConfig.guaranteedMovingMinSpeed);
+      assert(layer.guaranteed.moveSpeed <= GameConfig.guaranteedMovingMaxSpeed);
+    }
+    guaranteedMovingManager.platforms = guaranteedMovingManager.platforms.filter(
+      (platform) => platform.y <
+        guaranteedMovingManager.highestGeneratedY + GameConfig.height
+    );
+  }
+  const guaranteedMovingRate = guaranteedMovingCount / guaranteedMovingEligible;
+  assert(
+    guaranteedMovingRate >= 0.18 && guaranteedMovingRate <= 0.22,
+    `post-15,000 Guaranteed MOVING rate ${guaranteedMovingRate} is not near 20%`
+  );
+
+  const fallThroughPlatform = new Platform(
+    100,
+    300,
+    130,
+    PlatformType.FALL_THROUGH
+  );
+  const fallThroughGame = harness.game;
+  fallThroughGame.platformManager.platforms = [fallThroughPlatform];
+  fallThroughGame.player.reset(120, fallThroughPlatform.y -
+    fallThroughGame.player.height + 5);
+  fallThroughGame.player.previousY = fallThroughPlatform.y -
+    fallThroughGame.player.height - 5;
+  fallThroughGame.player.vy = 300;
+  const fallThroughY = fallThroughGame.player.y;
+  fallThroughGame.resolveLandings();
+  assert.equal(fallThroughPlatform.breaking, true);
+  assert.equal(fallThroughGame.player.y, fallThroughY);
+  assert.equal(fallThroughGame.player.vy, 300);
+  fallThroughPlatform.update(GameConfig.breakDelay);
+  assert.equal(fallThroughPlatform.removed, true);
 
   const movingManager = new PlatformManager(difficulty, {
     seed: "moving-breakable-rate",
@@ -980,6 +1164,9 @@ function validateDifficultyTransitions() {
     averageEarlyFillers: round(averageEarlyFillers, 3),
     earlyFillerCount,
     earlyLayerCount,
+    fallThroughFillerRate: round(fallThroughFillerRate, 4),
+    guaranteedFallThroughRate: round(guaranteedFallThroughRate, 4),
+    guaranteedMovingRate: round(guaranteedMovingRate, 4),
     movingBreakableRate: round(movingBreakableRate, 4),
     movingBreakables,
     movingSampleCount

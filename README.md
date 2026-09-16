@@ -25,6 +25,8 @@ The player jumps automatically whenever it lands on a platform.
 - Moving platforms have a 20% chance to also collapse after landing
 - Extra normal platforms make the route more forgiving through 3,000 points
 - Guaranteed Path platforms become breakable at a 25% rate from 8,000 points
+- FALL_THROUGH platforms collapse without bouncing: 30% of random fillers below 10,000 points, then 10% of Guaranteed slots from 10,000 points
+- Guaranteed slots use horizontally moving platforms at an overall 20% rate from 15,000 points
 - Spring items with a stronger jump and a score-independent 40% spawn chance
 - Propeller Hats rise at 350 px/s and spawn from 6,000 points at 15%, decreasing to 5% from 8,000 to 12,000
 - Jetpacks rise at 650 px/s, pass through monsters safely, and spawn from 6,000 points, decreasing from 15% to 5% by 12,000
@@ -50,7 +52,7 @@ node powerup.test.js
 node monster.test.js
 ```
 
-When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`) and filler (`F`) platforms and reproduces the same layout. Debug display is disabled by default. Runtime power-up state and remaining flight distance are available through `window.speakiJump.getSnapshot()`.
+When served locally, `?platformDebug=1&platformSeed=example` labels guaranteed (`G`), route-continuation (`R`), and filler (`F`) platforms and reproduces the same layout. Debug display is disabled by default. Runtime power-up state and remaining flight distance are available through `window.speakiJump.getSnapshot()`.
 
 ## GitHub Pages
 
