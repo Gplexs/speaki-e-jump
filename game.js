@@ -97,6 +97,16 @@
     cleanupMargin: 180,
     maxDeltaTime: 1 / 30,
     breakDelay: 0.22,
+    deathFallInitialVelocity: 420,
+    fallDeathCheckRatio: 0.62,
+    deathCameraDuration: 1.05,
+    deathCameraMaxOffset: 180,
+    deathCameraFollowSpeed: 5.5,
+    deathCameraFollowRatio: 0.55,
+    deathSequenceMinimumDuration: 1.25,
+    gameOverTransitionDuration: 0.85,
+    gameOverPanelStartOffset:
+      (CanvasConfig.height / CanvasConfig.renderScale) * 0.72,
     bestScoreKey: "speaki-e-jump-best-score",
     debugPlatformGeneration: false,
     debugSeed: null
@@ -105,6 +115,7 @@
   const GameState = Object.freeze({
     MENU: "MENU",
     PLAYING: "PLAYING",
+    DYING: "DYING",
     GAME_OVER: "GAME_OVER"
   });
 
@@ -127,6 +138,7 @@
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const lerp = (start, end, amount) => start + (end - start) * amount;
+  const easeOutCubic = (value) => 1 - (1 - clamp(value, 0, 1)) ** 3;
   const round = (value, precision = 3) => {
     const scale = 10 ** precision;
     return Math.round(value * scale) / scale;
@@ -2444,14 +2456,22 @@
       this.context.fillRect(0, 0, GameConfig.width, GameConfig.height);
     }
 
-    drawWorld(player, platforms, monsters, debugPlatformGeneration = false) {
+    drawWorld(
+      player,
+      platforms,
+      monsters,
+      debugPlatformGeneration = false,
+      showPlayer = true
+    ) {
       for (const platform of platforms) {
         this.drawPlatform(platform, debugPlatformGeneration);
       }
       for (const monster of monsters) {
         this.drawMonster(monster);
       }
-      this.drawPlayer(player);
+      if (showPlayer) {
+        this.drawPlayer(player);
+      }
     }
 
     drawMonster(monster) {
@@ -2659,27 +2679,40 @@
       );
     }
 
-    drawGameOver(score, best) {
+    drawGameOver(score, best, transitionProgress = 1) {
       const centerY = GameConfig.height * 0.5;
-      this.drawOverlay();
+      const easedProgress = easeOutCubic(transitionProgress);
+      const panelOffset = (1 - easedProgress) * GameConfig.gameOverPanelStartOffset;
+      this.drawOverlay(easedProgress);
       this.drawCenteredText(
         "GAME OVER",
-        centerY - 130,
+        centerY - 130 + panelOffset,
         "bold 42px Arial, sans-serif"
       );
-      this.drawCenteredText(`Score: ${score}`, centerY - 66, "24px Arial, sans-serif");
-      this.drawCenteredText(`Best: ${best}`, centerY - 32, "24px Arial, sans-serif");
-      this.drawButton("PLAY AGAIN", centerY + 22);
+      this.drawCenteredText(
+        `Score: ${score}`,
+        centerY - 66 + panelOffset,
+        "24px Arial, sans-serif"
+      );
+      this.drawCenteredText(
+        `Best: ${best}`,
+        centerY - 32 + panelOffset,
+        "24px Arial, sans-serif"
+      );
+      this.drawButton("PLAY AGAIN", centerY + 22 + panelOffset);
       this.drawCenteredText(
         "R / Enter / Space / Click",
-        centerY + 94,
+        centerY + 94 + panelOffset,
         "17px Arial, sans-serif"
       );
     }
 
-    drawOverlay() {
+    drawOverlay(alpha = 1) {
+      this.context.save();
+      this.context.globalAlpha = clamp(alpha, 0, 1);
       this.context.fillStyle = this.colors.overlay;
       this.context.fillRect(0, 0, GameConfig.width, GameConfig.height);
+      this.context.restore();
     }
 
     drawButton(label, y) {
@@ -2751,6 +2784,7 @@
       this.maxHeight = 0;
       this.cameraOffset = 0;
       this.playTime = 0;
+      this.resetDeathSequence();
       this.playerSpinRandom.reset();
       this.monsterManager.reset();
       const startPlatform = this.platformManager.reset(0);
@@ -2762,6 +2796,16 @@
         this.player = new Player(playerX, playerY, this.playerSpinRandom);
       }
       this.startPlayerY = playerY;
+    }
+
+    resetDeathSequence() {
+      this.deathReason = null;
+      this.finalScore = 0;
+      this.deathElapsed = 0;
+      this.deathFallDistance = 0;
+      this.deathCameraOffset = 0;
+      this.deathCameraTarget = 0;
+      this.gameOverTransitionProgress = 0;
     }
 
     startGame() {
@@ -2791,6 +2835,8 @@
 
       if (this.state === GameState.PLAYING) {
         this.update(deltaTime);
+      } else if (this.state === GameState.DYING) {
+        this.updateDeathSequence(deltaTime);
       }
       this.render();
       this.animationFrameId = requestAnimationFrame(this.loop);
@@ -2808,12 +2854,11 @@
         return;
       }
 
-      if (this.player.y > GameConfig.height) {
-        this.finishGame();
+      this.resolveLandings();
+      if (this.shouldBeginFallDeath()) {
+        this.beginDeathSequence("fall");
         return;
       }
-
-      this.resolveLandings();
       this.updateCamera();
       this.updateScore();
       const flightGenerationReserve = this.player.isFlying
@@ -2944,8 +2989,8 @@
         return { type: "STOMP", monster: stomp };
       }
 
-      this.finishGame();
-      return { type: "GAME_OVER", monster: collisions[0] };
+      this.beginDeathSequence("monster");
+      return { type: "DYING", monster: collisions[0] };
     }
 
     playerSweptOverlapsMonster(monster) {
@@ -3019,15 +3064,118 @@
       this.score = Math.floor(this.maxHeight);
     }
 
-    finishGame() {
-      this.state = GameState.GAME_OVER;
+    hasLandingSurfaceBelow() {
+      const currentBottom = this.player.y + this.player.height;
+      return this.platformManager.platforms.some((platform) => {
+        if (
+          platform.removed ||
+          platform.breaking ||
+          platform.isFallThrough
+        ) {
+          return false;
+        }
+        return platform.y >= currentBottom - 2 && platform.y <= GameConfig.height;
+      });
+    }
+
+    shouldBeginFallDeath() {
+      if (this.player.isFlying || this.player.vy <= 0) {
+        return false;
+      }
+      if (this.player.y > GameConfig.height) {
+        return true;
+      }
+      return this.player.y >= GameConfig.height * GameConfig.fallDeathCheckRatio &&
+        !this.hasLandingSurfaceBelow();
+    }
+
+    beginDeathSequence(reason) {
+      if (this.state !== GameState.PLAYING) {
+        return false;
+      }
+
+      this.state = GameState.DYING;
+      this.deathReason = reason;
+      this.finalScore = this.score;
+      this.deathElapsed = 0;
+      this.deathFallDistance = 0;
+      this.deathCameraOffset = 0;
+      this.deathCameraTarget = 0;
+      this.gameOverTransitionProgress = 0;
       this.input.clear();
       this.player.clearPowerUp();
       this.player.cancelJumpSpin();
-      if (this.score > this.bestScore) {
-        this.bestScore = this.score;
+      if (reason === "monster") {
+        this.player.vy = Math.max(
+          this.player.vy,
+          GameConfig.deathFallInitialVelocity
+        );
+      }
+      if (this.finalScore > this.bestScore) {
+        this.bestScore = this.finalScore;
         this.saveBestScore(this.bestScore);
       }
+      return true;
+    }
+
+    updateDeathSequence(deltaTime) {
+      if (this.state !== GameState.DYING) {
+        return false;
+      }
+
+      this.deathElapsed += deltaTime;
+      const previousPlayerY = this.player.y;
+      this.player.update(deltaTime, 0);
+      const physicalFallDistance = Math.max(0, this.player.y - previousPlayerY);
+      this.deathFallDistance += physicalFallDistance;
+
+      if (this.deathElapsed <= GameConfig.deathCameraDuration) {
+        this.deathCameraTarget = Math.min(
+          GameConfig.deathCameraMaxOffset,
+          this.deathFallDistance * GameConfig.deathCameraFollowRatio
+        );
+        const followAmount = 1 - Math.exp(
+          -GameConfig.deathCameraFollowSpeed * deltaTime
+        );
+        const desiredShift = Math.max(
+          0,
+          (this.deathCameraTarget - this.deathCameraOffset) * followAmount
+        );
+        const cameraShift = Math.min(
+          desiredShift,
+          physicalFallDistance * 0.9
+        );
+        if (cameraShift > 0) {
+          this.deathCameraOffset += cameraShift;
+          this.player.y -= cameraShift;
+          this.player.previousY -= cameraShift;
+          this.platformManager.scroll(-cameraShift);
+          this.monsterManager.scroll(-cameraShift);
+        }
+      }
+
+      this.gameOverTransitionProgress = clamp(
+        this.deathElapsed / GameConfig.gameOverTransitionDuration,
+        0,
+        1
+      );
+
+      if (
+        this.deathElapsed >= GameConfig.deathSequenceMinimumDuration &&
+        this.gameOverTransitionProgress >= 1
+      ) {
+        this.completeDeathSequence();
+      }
+      return true;
+    }
+
+    completeDeathSequence() {
+      if (this.state !== GameState.DYING) {
+        return false;
+      }
+      this.state = GameState.GAME_OVER;
+      this.gameOverTransitionProgress = 1;
+      return true;
     }
 
     loadBestScore() {
@@ -3049,19 +3197,32 @@
 
     render() {
       this.renderer.clear();
+      const playerIsVisible = this.state !== GameState.GAME_OVER &&
+        (
+          this.state !== GameState.DYING ||
+          this.player.y <= GameConfig.height + this.player.height
+        );
       this.renderer.drawWorld(
         this.player,
         this.platformManager.platforms,
         this.monsterManager.monsters,
-        this.platformManager.debugEnabled
+        this.platformManager.debugEnabled,
+        playerIsVisible
       );
 
       if (this.state === GameState.PLAYING) {
         this.renderer.drawHud(this.score, this.bestScore);
       } else if (this.state === GameState.MENU) {
         this.renderer.drawMenu();
+      } else if (this.state === GameState.DYING) {
+        this.renderer.drawHud(this.finalScore, this.bestScore);
+        this.renderer.drawGameOver(
+          this.finalScore,
+          this.bestScore,
+          this.gameOverTransitionProgress
+        );
       } else if (this.state === GameState.GAME_OVER) {
-        this.renderer.drawGameOver(this.score, this.bestScore);
+        this.renderer.drawGameOver(this.finalScore, this.bestScore, 1);
       }
     }
 
@@ -3072,6 +3233,17 @@
         bestScore: this.bestScore,
         playTime: Math.round(this.playTime * 100) / 100,
         cameraOffset: Math.round(this.cameraOffset * 100) / 100,
+        death: {
+          reason: this.deathReason,
+          finalScore: this.finalScore,
+          elapsed: round(this.deathElapsed),
+          cameraOffset: round(this.deathCameraOffset),
+          cameraTarget: round(this.deathCameraTarget),
+          transitionProgress: round(this.gameOverTransitionProgress),
+          playerVisible:
+            this.state === GameState.DYING &&
+            this.player.y <= GameConfig.height + this.player.height
+        },
         generation: {
           layerCount: this.platformManager.layerIndex,
           highestGeneratedY: round(this.platformManager.highestGeneratedY),

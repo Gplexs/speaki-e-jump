@@ -171,6 +171,17 @@ function makeGame() {
   return game;
 }
 
+function advanceDeathSequence(game, framesPerSecond = 60) {
+  const step = 1 / framesPerSecond;
+  let frames = 0;
+  while (game.state === GameState.DYING && frames < framesPerSecond * 3) {
+    game.updateDeathSequence(step);
+    frames += 1;
+  }
+  assert(frames < framesPerSecond * 3, "death sequence did not complete");
+  return frames;
+}
+
 const tests = [];
 let spawnValidationReport = null;
 function test(name, callback) {
@@ -396,7 +407,7 @@ test("stomp wins before death and uses swept top collision", () => {
   assert.equal(game.monsterManager.stats.removedByStomp, 1);
 });
 
-test("side, underside, and Spring-powered collisions cause GAME_OVER", () => {
+test("side, underside, and Spring-powered collisions enter the shared death sequence", () => {
   const cases = [
     { previousY: 300, y: 300, vy: 0, label: "side" },
     { previousY: 340, y: 300, vy: -500, label: "underside" },
@@ -419,10 +430,147 @@ test("side, underside, and Spring-powered collisions cause GAME_OVER", () => {
     game.player.vy = collisionCase.vy;
 
     const result = game.resolveMonsterCollisions();
-    assert.equal(result?.type, "GAME_OVER", `${collisionCase.label} collision survived`);
-    assert.equal(game.state, GameState.GAME_OVER);
+    assert.equal(result?.type, "DYING", `${collisionCase.label} collision survived`);
+    assert.equal(game.state, GameState.DYING);
+    assert.equal(game.deathReason, "monster");
+    assert(game.player.vy >= GameConfig.deathFallInitialVelocity);
     assert.equal(monster.alive, true);
+    assert.equal(game.beginDeathSequence("fall"), false, "duplicate death was accepted");
+    advanceDeathSequence(game);
+    assert.equal(game.state, GameState.GAME_OVER);
+    assert.equal(game.gameOverTransitionProgress, 1);
   }
+});
+
+test("monster death falls, follows with the camera, freezes score, then restarts", () => {
+  const game = makeGame();
+  const platform = makePlatform({ x: 90, y: 520, width: 130 });
+  platform.addPowerUp(ItemType.PROPELLER_HAT, {
+    range: (minimum, maximum) => (minimum + maximum) * 0.5
+  });
+  const untouchedItem = platform.item;
+  const monster = makeMonster(150, 300);
+  game.platformManager.platforms = [platform];
+  game.monsterManager.monsters = [monster];
+  game.score = 4321;
+  game.bestScore = 100;
+  game.player.x = 150;
+  game.player.previousX = 150;
+  game.player.y = 300;
+  game.player.previousY = 300;
+  game.player.vx = 0;
+  game.player.vy = 0;
+
+  const result = game.resolveMonsterCollisions();
+  assert.equal(result?.type, "DYING");
+  assert.equal(game.state, GameState.DYING);
+  assert.equal(game.finalScore, 4321);
+  assert.equal(game.score, 4321);
+  assert.equal(game.bestScore, 4321);
+  assert.equal(game.input.direction, 0);
+
+  game.handleAction("Enter");
+  assert.equal(game.state, GameState.DYING, "restart was accepted during DYING");
+
+  const playerStartY = game.player.y;
+  const platformStartY = platform.y;
+  const monsterStartY = monster.y;
+  const platformCount = game.platformManager.platforms.length;
+  const monsterCount = game.monsterManager.monsters.length;
+  game.input.right = true;
+  game.updateDeathSequence(1 / 60);
+
+  assert(game.player.y > playerStartY, "dead player did not move down");
+  assert(platform.y < platformStartY, "world did not move up");
+  assert(monster.y < monsterStartY, "monster layer did not move with the world");
+  assert(game.deathCameraOffset > 0, "death camera did not follow");
+  assert(game.gameOverTransitionProgress > 0, "game-over UI did not start concurrently");
+  assert.equal(game.player.x, 150, "DYING input moved the player");
+  assert.equal(game.score, 4321, "score changed during DYING");
+  assert.equal(game.platformManager.platforms.length, platformCount);
+  assert.equal(game.monsterManager.monsters.length, monsterCount);
+  assert.equal(platform.breaking, false, "dead player landed on a platform");
+  assert.equal(platform.item, untouchedItem, "dead player collected an item");
+  assert.equal(untouchedItem.collected, false);
+
+  const frames = advanceDeathSequence(game);
+  assert(frames > 0);
+  assert.equal(game.state, GameState.GAME_OVER);
+  assert.equal(game.finalScore, 4321);
+  assert.equal(game.gameOverTransitionProgress, 1);
+  assert(game.player.y > GameConfig.height + game.player.height);
+
+  game.handleAction("Enter");
+  assert.equal(game.state, GameState.PLAYING);
+  assert.equal(game.deathReason, null);
+  assert.equal(game.finalScore, 0);
+  assert.equal(game.deathCameraOffset, 0);
+  assert.equal(game.gameOverTransitionProgress, 0);
+});
+
+test("fall death preserves downward velocity and uses the same transition", () => {
+  const game = makeGame();
+  game.platformManager.platforms = [makePlatform({ x: 40, y: 180, width: 120 })];
+  game.monsterManager.monsters = [];
+  game.score = 987;
+  game.player.x = 220;
+  game.player.previousX = 220;
+  game.player.y = GameConfig.height * GameConfig.fallDeathCheckRatio + 2;
+  game.player.previousY = game.player.y - 8;
+  game.player.vy = 600;
+
+  game.update(1 / 60);
+
+  assert.equal(game.state, GameState.DYING);
+  assert.equal(game.deathReason, "fall");
+  assert.equal(game.finalScore, 987);
+  assert(game.player.vy > 600, "fall velocity was reset instead of preserved");
+  const scoreAtDeath = game.score;
+  const playerYAtDeath = game.player.y;
+  game.updateDeathSequence(1 / 60);
+  assert(game.player.y > playerYAtDeath);
+  assert(game.deathCameraOffset > 0);
+  assert.equal(game.score, scoreAtDeath);
+
+  advanceDeathSequence(game);
+  assert.equal(game.state, GameState.GAME_OVER);
+  assert.equal(game.finalScore, 987);
+
+  const springGame = makeGame();
+  const springPlatform = makePlatform({ x: 100, y: 720, width: 130 });
+  springPlatform.addSpring({ range: (minimum, maximum) => (minimum + maximum) * 0.5 });
+  springGame.platformManager.platforms = [springPlatform];
+  springGame.player.y = GameConfig.height * GameConfig.fallDeathCheckRatio + 2;
+  springGame.player.vy = 500;
+  assert.equal(
+    springGame.shouldBeginFallDeath(),
+    false,
+    "a Spring platform below the player was ignored as a landing surface"
+  );
+});
+
+test("game-over panel eases upward in screen space", () => {
+  const game = makeGame();
+  const calls = [];
+  game.context.fillText = (text, x, y) => calls.push({ text, x, y });
+  const titleY = (progress) => {
+    calls.length = 0;
+    game.renderer.drawGameOver(123, 456, progress);
+    return calls.find((call) => call.text === "GAME OVER").y;
+  };
+
+  const startY = titleY(0);
+  const halfwayY = titleY(0.5);
+  const finalY = titleY(1);
+  approximately(finalY, GameConfig.height * 0.5 - 130);
+  assert(startY > GameConfig.height, "panel did not start below the screen");
+  assert(halfwayY > finalY && halfwayY < startY);
+  approximately(
+    halfwayY,
+    finalY + GameConfig.gameOverPanelStartOffset * 0.125,
+    1e-7,
+    "easeOutCubic midpoint"
+  );
 });
 
 test("Propeller Hat and Jetpack remove monsters without consuming flight", () => {

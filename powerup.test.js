@@ -837,10 +837,14 @@ test("Guaranteed Path becomes BREAKABLE at a 25% rate from 8,000 points", () => 
 test("game over, restart, collection, and cleanup leave no active stale state", () => {
   const game = makeGame();
   game.player.activatePowerUp(ItemType.JETPACK);
-  game.finishGame();
-  assert.equal(game.state, GameState.GAME_OVER);
+  assert.equal(game.beginDeathSequence("monster"), true);
+  assert.equal(game.state, GameState.DYING);
   assert.equal(game.player.activePowerUp, null);
   assert.equal(game.player.powerUpTimer, 0);
+  while (game.state === GameState.DYING) {
+    game.updateDeathSequence(1 / 60);
+  }
+  assert.equal(game.state, GameState.GAME_OVER);
 
   const stalePlatform = makePlatform(100, 300, 130);
   stalePlatform.addPowerUp(ItemType.PROPELLER_HAT, fixedRandom());

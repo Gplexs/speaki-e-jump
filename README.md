@@ -38,6 +38,7 @@ The player jumps automatically whenever it lands on a platform.
 - Upward-only camera scrolling
 - Height-based score and locally saved best score
 - Menu, gameplay, game-over, and stable restart states
+- PLAYING → DYING → GAME_OVER death sequence with falling camera follow and slide-up UI
 - Responsive 720 × 1280 (9:16 portrait) Canvas rendering
 - 1.5× design-space rendering that preserves the established physics and score curve
 - Delta-time clamping and off-screen object cleanup
